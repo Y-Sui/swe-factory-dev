@@ -23,6 +23,18 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+PR_KEYWORDS = {
+    "close",
+    "closes",
+    "closed",
+    "fix",
+    "fixes",
+    "fixed",
+    "resolve",
+    "resolves",
+    "resolved",
+}
+
 def get_language_with_pygments(filename):
     try:
         lexer = get_lexer_for_filename(filename)
@@ -162,17 +174,6 @@ class Repo:
         # Define 1. issue number regex pattern 2. comment regex pattern 3. keywords
         issues_pat = re.compile(r"(\w+)\s+\#(\d+)")
         comments_pat = re.compile(r"(?s)<!--.*?-->")
-        keywords = {
-            "close",
-            "closes",
-            "closed",
-            "fix",
-            "fixes",
-            "fixed",
-            "resolve",
-            "resolves",
-            "resolved",
-        }
 
         # Construct text to search over for issue numbers from PR body and commit messages
         text = pull['title'] if pull['title'] else ""
@@ -184,13 +185,13 @@ class Repo:
         # Remove comments from text
         text = comments_pat.sub("", text)
         # Look for issue numbers in text via scraping <keyword, number> patterns
-        references = dict(issues_pat.findall(text))
-        resolved_issues = list()
+        references = issues_pat.findall(text)
+        resolved_issues_set = set()
         if references:
-            for word, issue_num in references.items():
-                if word.lower() in keywords:
-                    resolved_issues.append(issue_num)
-        return resolved_issues
+            for word, issue_num in references:
+                if word.lower() in PR_KEYWORDS:
+                    resolved_issues_set.add(issue_num)
+        return list(resolved_issues_set)
     
     def extract_resolved_issues(self, pull: dict) -> list[str]:
         """
@@ -204,17 +205,6 @@ class Repo:
         # Define 1. issue number regex pattern 2. comment regex pattern 3. keywords
         issues_pat = re.compile(r"(\w+)\s+\#(\d+)")
         comments_pat = re.compile(r"(?s)<!--.*?-->")
-        keywords = {
-            "close",
-            "closes",
-            "closed",
-            "fix",
-            "fixes",
-            "fixed",
-            "resolve",
-            "resolves",
-            "resolved",
-        }
 
         # Construct text to search over for issue numbers from PR body and commit messages
         text = pull.title if pull.title else ""
@@ -228,13 +218,13 @@ class Repo:
         # Remove comments from text
         text = comments_pat.sub("", text)
         # Look for issue numbers in text via scraping <keyword, number> patterns
-        references = dict(issues_pat.findall(text))
-        resolved_issues = list()
+        references = issues_pat.findall(text)
+        resolved_issues_set = set()
         if references:
-            for word, issue_num in references.items():
-                if word.lower() in keywords:
-                    resolved_issues.append(issue_num)
-        return resolved_issues
+            for word, issue_num in references:
+                if word.lower() in PR_KEYWORDS:
+                    resolved_issues_set.add(issue_num)
+        return list(resolved_issues_set)
 
     def get_all_loop(
         self,
