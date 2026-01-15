@@ -9,7 +9,7 @@ This folder is a two-stage workflow:
 ```bash
 conda create -n inference python=3.13 -y
 conda activate inference
-pip install -r /mnt/data/glh/swe-factory/requirements-inference.txt
+pip install -r requirements-inference.txt
 ```
 
 ## Stage 1: Build SWE Env Images Locally
