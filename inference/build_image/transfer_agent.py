@@ -69,6 +69,7 @@ class TransferAgent:
         task_dict: Dict[str, Any],
         max_iteration_num: int,
         output_path: str,
+        eval_timeout: int = 300,
     ) -> None:
         self.task_dict = task_dict
         self.max_iteration_num = max_iteration_num
@@ -120,6 +121,7 @@ class TransferAgent:
         self.current_dockerfile_text = self.original_dockerfile
         self.current_eval_script_text = self.original_eval_script
         self.current_notes: Optional[str] = None
+        self.eval_timeout = eval_timeout
 
     # ------------------------------------------------------------------
     # Prompt / context helpers
@@ -897,7 +899,7 @@ class TransferAgent:
                     iteration_dir=iter_dir,
                     log_name=f"{self.name}_{iteration}_exec.log",
                     dest_path="/opt/run_tests.sh",
-                    timeout=300,
+                    timeout=self.eval_timeout,
                     copy_from_host=True,
                 )
                 self.last_exec_exit_code = eval_result["exit_code"]

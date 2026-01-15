@@ -94,6 +94,7 @@ def run_instance(
     instance: dict[str, Any],
     output_dir: Path,
     max_iterations: int,
+    eval_timeout: int,
 ) -> dict[str, Any]:
     inst_id = instance.get("instance_id")
     if not inst_id:
@@ -115,6 +116,7 @@ def run_instance(
             task_dict=instance,
             max_iteration_num=max_iterations,
             output_path=str(inst_output),
+            eval_timeout=eval_timeout,
         )
         logger.info("starting instance %s", inst_id)
         ok = agent.run_task()
@@ -136,6 +138,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, help="path to JSON list of instances")
     parser.add_argument("--output", required=True, help="directory to store run artifacts")
     parser.add_argument("--max-iterations", type=int, default=5, help="maximum iterations per instance")
+    parser.add_argument("--eval-timeout", type=int, default=300, help="eval script timeout (seconds)")
     parser.add_argument("--max-workers", type=int, default=2, help="parallel workers")
     parser.add_argument("--skip-existing", action="store_true", help="skip instances with summary.json already present")
     return parser
@@ -169,6 +172,7 @@ def main() -> None:
                     inst,
                     output_dir,
                     args.max_iterations,
+                    args.eval_timeout,
                 ): inst["instance_id"]
                 for inst in pending
             }
