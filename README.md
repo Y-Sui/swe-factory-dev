@@ -12,7 +12,7 @@ Your automated factory for GitHub Issue Resolution Training Data and Evaluation 
 </p>
 
 ## 📰 News
-* **[Jan. 15, 2026]**: We support agent inference for running coding agents on SWE-Factory environments. See [inference/README.md](./inference/README.md).
+* **[Jan. 15, 2026]**: We support coding agents inference on SWE-Factory environments. See docs(./inference/README.md).
 * **[Jan. 5, 2026]**: We release **Awesome-Issue-Resolution**, an awesome list/survey of LLM-based issue resolution research & resources. Check it out [here](https://github.com/DeepSoftwareAnalytics/Awesome-Issue-Resolution).
 * **[Dec. 23, 2025]**: Our paper was accepted to FSE 2026! Check our latest paper [PDF](./preprint.pdf) | [arXiv](https://arxiv.org/abs/2506.10954v3)!
 * **[Sep. 17, 2025]**: *Build your own SWE-GYM with SWE-Factory!* We trained a series of LLMs on 2,809 Python task instances constructed with our framework, all demonstrating effective performance improvements. For instance, the resolve rate of the fine-tuned Qwen2.5-Coder-14B-instruct model increased from 5.8% to 21.0%. The training trajectories sampled from our 2,809 task instances and fine-tuned models are open-sourced on <a href="https://huggingface.co/SWE-Factory">🤗 Huggingface</a>.
