@@ -70,7 +70,7 @@ class TransferAgent:
         max_iteration_num: int,
         output_path: str,
         eval_timeout: int = 300,
-        model_name: str | None = None,
+        model_name: str,
     ) -> None:
         self.task_dict = task_dict
         self.max_iteration_num = max_iteration_num
@@ -99,7 +99,7 @@ class TransferAgent:
         self.responses = ResponseTracker(self.output_dir)
         self.iter_recorder = IterationRecorder(self.output_dir)
         self.self_check_max_revisions = int(os.environ.get("SELF_CHECK_MAX_REVISIONS", "2"))
-        self.model_name = model_name or os.getenv("OPENAI_MODEL")
+        self.model_name = model_name
 
         self.manual_dockerfile_path = None
         self.execution_mode = "auto"
@@ -229,7 +229,7 @@ class TransferAgent:
         max_attempts = 3
         model_name = self.model_name
         if not model_name:
-            raise ParsingError("Missing model name (set --model_name or OPENAI_MODEL)")
+            raise ParsingError("Missing model name (set --model_name)")
         for attempt in range(1, max_attempts + 1):
             payload = {"model": model_name, "messages": self.agent_context}
             data = self._call_model(payload)
@@ -311,7 +311,7 @@ class TransferAgent:
 
         for attempt in range(max_attempts):
             payload = {
-                "model": os.getenv("OPENAI_MODEL"),
+                "model": self.model_name,
                 "messages": [
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": prompt},
@@ -346,7 +346,7 @@ class TransferAgent:
 
         for attempt in range(max_attempts):
             payload = {
-                "model": os.getenv("OPENAI_MODEL"),
+                "model": self.model_name,
                 "messages": [
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": prompt},
@@ -591,7 +591,7 @@ class TransferAgent:
             "Explain your reasoning briefly and then return only \"True\" or \"False\".\n\n"
             f"Dockerfile content:\n{dockerfile_str}\n"
         )
-        payload = {"model": os.getenv("OPENAI_MODEL"), "messages": [{"role": "user", "content": prompt}]}
+        payload = {"model": self.model_name, "messages": [{"role": "user", "content": prompt}]}
         data = self._call_model(payload)
         ans = data["choices"][0]["message"]["content"].strip()
         if "True" in ans:

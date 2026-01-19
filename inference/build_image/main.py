@@ -94,7 +94,7 @@ def run_instance(
     output_dir: Path,
     max_iterations: int,
     eval_timeout: int,
-    model_name: str | None,
+    model_name: str,
 ) -> dict[str, Any]:
     inst_id = instance.get("instance_id")
     if not inst_id:
@@ -144,6 +144,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-existing", action="store_true", help="skip instances with summary.json already present")
     parser.add_argument(
         "--model_name",
+        required=True,
         help="LLM model name for OpenAI-compatible calls",
     )
     return parser

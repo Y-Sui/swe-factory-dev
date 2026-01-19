@@ -45,7 +45,7 @@ export OPENAI_API_KEY="YOUR_API_KEY"
 export OPENAI_BASE_URL="YOUR_URL"  # optional override
 ```
 
-Set the model name via `--model_name <model_name>` (or `OPENAI_MODEL` if already set).
+Set the model name via `--model_name <model_name>` (required).
 
 ### Command
 
