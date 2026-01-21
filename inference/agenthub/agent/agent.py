@@ -28,6 +28,11 @@ from inference.agenthub.tools import (
     submit_tool,
 )
 import traceback
+try:
+    from jinja2 import Environment, BaseLoader
+except Exception:
+    Environment = None
+    BaseLoader = None
 logger = get_logger(__name__)  # Logger for this module
 MAX_CONTEXT_TOKENS = 65536
 
@@ -40,6 +45,8 @@ class AgentArgs:
     instance_prompt: str
     command_files: List[Path]
     llm_name: str
+    action_observation_template: Optional[str] = None
+    format_error_template: Optional[str] = None
     llm_base_url: Optional[str] = "http://localhost:8000/v1"  # None
     demo_file: Optional[Path] = None
     use_demo: Optional[bool] = False
@@ -85,6 +92,139 @@ class Agent:
         self.disable_normalize_response = self.other_args.get(
             "disable_normalize_response", False
         )
+        self._mini_templates_loaded = False
+        self._mini_templates = None
+        self._mini_jinja_env = None
+
+    @staticmethod
+    def _normalize_task_placeholder(template: str) -> str:
+        return re.sub(r"{{\s*task\s*}}", "{problem_statement}", template)
+
+    def _maybe_load_mini_templates(self) -> None:
+        if self._mini_templates_loaded:
+            return
+        self._mini_templates_loaded = True
+
+        inline_action = getattr(self.args, "action_observation_template", None)
+        inline_format = getattr(self.args, "format_error_template", None)
+        if inline_action or inline_format:
+            self._mini_templates = {
+                "action_observation_template": inline_action,
+                "format_error_template": inline_format,
+            }
+            self.instance_prompt_template = self._normalize_task_placeholder(
+                self.instance_prompt_template
+            )
+            if Environment and BaseLoader:
+                self._mini_jinja_env = Environment(
+                    loader=BaseLoader(),
+                    autoescape=False,
+                    trim_blocks=True,
+                    lstrip_blocks=True,
+                )
+            return
+
+        config_path = self.other_args.get("mini_template_config") or os.environ.get(
+            "MINI_SWE_AGENT_TEMPLATE_PATH"
+        )
+        if not config_path:
+            self.instance_prompt_template = self._normalize_task_placeholder(
+                self.instance_prompt_template
+            )
+            return
+
+        cfg_path = Path(config_path)
+        if not cfg_path.is_absolute():
+            cfg_path = (Path.cwd() / cfg_path).resolve()
+        if not cfg_path.exists():
+            self.logger.warning(f"Mini template config not found: {cfg_path}")
+            return
+
+        try:
+            data = yaml.safe_load(cfg_path.read_text())
+        except Exception as exc:
+            self.logger.warning(
+                f"Failed to load mini template config {cfg_path}: {exc}"
+            )
+            return
+
+        if not isinstance(data, dict):
+            self.logger.warning(
+                f"Mini template config {cfg_path} is not a mapping; skipping."
+            )
+            return
+
+        agent_cfg = data.get("agent", data)
+        if not isinstance(agent_cfg, dict):
+            self.logger.warning(
+                f"Mini template config {cfg_path} has invalid agent section; skipping."
+            )
+            return
+
+        self._mini_templates = {
+            "action_observation_template": agent_cfg.get(
+                "action_observation_template"
+            ),
+            "format_error_template": agent_cfg.get("format_error_template"),
+        }
+
+        system_template = agent_cfg.get("system_template")
+        instance_template = agent_cfg.get("instance_template")
+        if system_template:
+            self.system_prompt_template = system_template
+        if instance_template:
+            self.instance_prompt_template = self._normalize_task_placeholder(
+                instance_template
+            )
+        else:
+            self.instance_prompt_template = self._normalize_task_placeholder(
+                self.instance_prompt_template
+            )
+
+        if Environment and BaseLoader:
+            self._mini_jinja_env = Environment(
+                loader=BaseLoader(),
+                autoescape=False,
+                trim_blocks=True,
+                lstrip_blocks=True,
+            )
+
+    def _render_mini_template(self, template: Optional[str], **context) -> Optional[str]:
+        if not template:
+            return None
+        if Environment is None or BaseLoader is None:
+            raise RuntimeError("Jinja2 unavailable for mini templates.")
+        if self._mini_jinja_env is None:
+            self._mini_jinja_env = Environment(
+                loader=BaseLoader(),
+                autoescape=False,
+                trim_blocks=True,
+                lstrip_blocks=True,
+            )
+        try:
+            return self._mini_jinja_env.from_string(template).render(**context)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to render mini template: {exc}") from exc
+
+    def _format_mini_observation(self, obs_obj) -> str:
+        try:
+            out = obs_obj.bash_output if hasattr(obs_obj, "bash_output") else str(obs_obj)
+            rc = obs_obj.error_code if hasattr(obs_obj, "error_code") else ""
+        except Exception:
+            out, rc = str(obs_obj), ""
+
+        out = out or ""
+        rc = "" if rc is None else rc
+
+        template = None
+        if self._mini_templates:
+            template = self._mini_templates.get("action_observation_template")
+        if not template:
+            raise RuntimeError("Missing action_observation_template for mini scaffold.")
+        rendered = self._render_mini_template(
+            template, output={"returncode": rc, "output": out}
+        )
+        return rendered.strip()
 
 
 
@@ -265,6 +405,7 @@ class Agent:
         """
         Mini mode: enforce exactly one bash code block. On failure, return a format error string.
         """
+        self._maybe_load_mini_templates()
         pattern = re.compile(r"```bash\s*\n(.*?)\n```", re.DOTALL)
         actions = pattern.findall(response_text)
         if len(actions) == 1:
@@ -272,19 +413,12 @@ class Agent:
             # align with mini-swe-agent style: keep everything before the bash block as thought
             thought = response_text.split("```bash", 1)[0].strip()
             return thought, Action(function_name="bash", parameters={"command": cmd}), None
-        fmt_error = (
-            "Please always provide EXACTLY ONE action in triple backticks, "
-            f"found {len(actions)} actions.\n\n"
-            "Please format your action in triple backticks as shown in <response_example>.\n\n"
-            "<response_example>\n"
-            "Here are some thoughts about why you want to perform the action.\n\n"
-            "```bash\n"
-            "<action>\n"
-            "```\n"
-            "</response_example>\n\n"
-            "If you have completed your assignment, please consult the first message about how to\n"
-            "submit your solution (you will not be able to continue working on this task after that)."
-        )
+        template = None
+        if self._mini_templates:
+            template = self._mini_templates.get("format_error_template")
+        if not template:
+            raise RuntimeError("Missing format_error_template for mini scaffold.")
+        fmt_error = self._render_mini_template(template, actions=actions)
         return response_text.strip(), Action(function_name="", parameters={}), fmt_error
 
     def parse_response_v2(self, response_text: str) -> Tuple[str, Action]:
@@ -350,8 +484,12 @@ class Agent:
         metadata: Optional[Dict[str, Any]] = {},
         scaffold: str = "r2egym",
     ):
-        assert scaffold in ["r2egym", "openhands", "sweagent", "mini_swe_agent"], "Scaffold must be either r2egym or openhands or sweagent or mini_swe_agent"
+        assert scaffold in ["r2egym", "openhands", "sweagent", "mini_swe_agent", "live_swe_agent"], "Scaffold must be either r2egym or openhands or sweagent or mini_swe_agent or live_swe_agent"
         self.scaffold = scaffold
+        if self.scaffold in ["mini_swe_agent", "live_swe_agent"]:
+            self._maybe_load_mini_templates()
+            if "disable_normalize_response" not in self.other_args:
+                self.disable_normalize_response = True
         # get the start time
         start_time = time.time()
         self.llm_timeout = max_llm_time
@@ -474,7 +612,7 @@ class Agent:
             if self.use_fn_calling:
                 thought, action = self.custom_parser(response)
             else:
-                if self.scaffold == "mini_swe_agent":
+                if self.scaffold in ["mini_swe_agent", "live_swe_agent"]:
                     thought, action, format_error = self.parse_mini_response(assistant_message)
                 else:
                     thought, action = self.parse_response(assistant_message)
@@ -484,7 +622,7 @@ class Agent:
             self.logger.info(f"ACTION:\n{action.to_bashcmd()}\n")
 
             # If mini mode format error, push feedback to history and skip execution (still count the step)
-            if format_error and self.scaffold == "mini_swe_agent":
+            if format_error and self.scaffold in ["mini_swe_agent", "live_swe_agent"]:
                 self.logger.warning(f"Format error: {format_error}")
                 self.history.append({"role": "assistant", "content": assistant_message})
                 self.history.append({"role": "user", "content": format_error})
@@ -503,7 +641,7 @@ class Agent:
 
             # Mini-swe-agent: rewrite timeout observation to a structured message
             if (
-                self.scaffold == "mini_swe_agent"
+                self.scaffold in ["mini_swe_agent", "live_swe_agent"]
                 and isinstance(obs, str)
                 and ("took too long to execute" in obs.lower() or "timeout" in obs.lower())
             ):
@@ -519,34 +657,11 @@ class Agent:
                     "Please try another command and make sure to avoid those requiring interactive input."
                 )
 
-            # Format observation (mini_swe_agent uses swebench-style truncation/warning)
-            def _format_obs_mini(obs_obj) -> str:
-                try:
-                    out = obs_obj.bash_output if hasattr(obs_obj, "bash_output") else str(obs_obj)
-                    rc = obs_obj.error_code if hasattr(obs_obj, "error_code") else ""
-                except Exception:
-                    out, rc = str(obs_obj), ""
-                out = out or ""
-                if len(out) < 10000:
-                    return f"<returncode>{rc}</returncode>\n<output>\n{out}\n</output>"
-                elided_chars = len(out) - 10000
-                head = out[:5000]
-                tail = out[-5000:]
-                return (
-                    f"<returncode>{rc}</returncode>\n"
-                    "<warning>\n"
-                    "The output of your last command was too long.\n"
-                    "Please try a different command that produces less output.\n"
-                    "If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.\n"
-                    "If you're using grep or find and it produced too much output, you can use a more selective search pattern.\n"
-                    "If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.\n"
-                    "</warning>\n"
-                    f"<output_head>\n{head}\n</output_head>\n"
-                    f"<elided_chars>\n{elided_chars} characters elided\n</elided_chars>\n"
-                    f"<output_tail>\n{tail}\n</output_tail>"
-                )
-
-            obs_content = _format_obs_mini(obs) if self.scaffold == "mini_swe_agent" else str(obs)
+            obs_content = (
+                self._format_mini_observation(obs)
+                if self.scaffold in ["mini_swe_agent", "live_swe_agent"]
+                else str(obs)
+            )
 
             env_exec_time = info["total_time"]
             total_step_time = llm_exec_time + env_exec_time

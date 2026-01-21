@@ -768,7 +768,7 @@ class DockerRuntime(ExecutionEnvironment):
         if self.backend == "kubernetes":
             return self._run_kubernetes(exec_code, timeout, args, workdir=exec_workdir)
 
-        if self.scaffold == "mini_swe_agent":
+        if self.scaffold in ["mini_swe_agent", "live_swe_agent"]:
             if use_timeout_wrapper:
                 exec_cmd = ["timeout", "-k", "5s", f"{timeout}s", "bash", "-lc", real_cmd]
             else:
@@ -780,7 +780,7 @@ class DockerRuntime(ExecutionEnvironment):
             env_kwargs = {}
             if not self.swefactory:
                 env_kwargs["environment"] = {"PATH": DOCKER_PATH}
-            if self.scaffold == "mini_swe_agent":
+            if self.scaffold in ["mini_swe_agent", "live_swe_agent"]:
                 quiet_env = {
                     "PAGER": "cat",
                     "MANPAGER": "cat",

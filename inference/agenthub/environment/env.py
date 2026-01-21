@@ -165,8 +165,8 @@ class RepoEnv(gym.Env):
         return first_line.startswith("#!")
 
     def run_action(self, action: Action, timeout: int):
-        # mini_swe_agent: allow raw bash command even if function_name is empty or a virtual "bash"
-        if self.scaffold == "mini_swe_agent" and (not action.function_name or action.function_name == "bash"):
+        # mini_swe_agent/live_swe_agent: allow raw bash command even if function_name is empty or a virtual "bash"
+        if self.scaffold in ["mini_swe_agent", "live_swe_agent"] and (not action.function_name or action.function_name == "bash"):
             start_time = time.time()
             try:
                 bash_cmd = action.parameters.get("command", "")
@@ -229,7 +229,7 @@ class RepoEnv(gym.Env):
         reward = self.calculate_reward(self.observation)
 
         # Mini mode: detect completion tokens in stdout first line.
-        if self.scaffold == "mini_swe_agent":
+        if self.scaffold in ["mini_swe_agent", "live_swe_agent"]:
             lines = (bash_output or "").lstrip().splitlines()
             if lines and lines[0].strip() in ["MINI_SWE_AGENT_FINAL_OUTPUT", "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]:
                 self.done = True

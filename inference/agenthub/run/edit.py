@@ -363,8 +363,8 @@ def runagent(
         jsonl_file: Path to the JSONL file to save results. If not provided, generated using traj_dir and exp_name.
         exp_name: Experiment name. Used if jsonl_file is not provided. If not provided, a unique name is generated.
     """
-    assert scaffold in ["r2egym", "sweagent", "openhands", "mini_swe_agent"], (
-        f"Scaffold is {scaffold}, must be one of [r2egym, sweagent, openhands, mini_swe_agent]"
+    assert scaffold in ["r2egym", "sweagent", "openhands", "mini_swe_agent", "live_swe_agent"], (
+        f"Scaffold is {scaffold}, must be one of [r2egym, sweagent, openhands, mini_swe_agent, live_swe_agent]"
     )
     # Generate a unique experiment name if not provided
     if exp_name is None:
@@ -388,14 +388,14 @@ def runagent(
     env_args = EnvArgs(ds=ds, root_mode=root_mode)
 
     # Initialize the RepoEnv
-    if scaffold == "mini_swe_agent":
+    if scaffold in ["mini_swe_agent", "live_swe_agent"]:
         env = RepoEnv(env_args, logger=logger, backend=backend, scaffold=scaffold, step_timeout=60)
     else:
         env = RepoEnv(env_args, logger=logger, backend=backend, scaffold=scaffold)
     # set agent args
     if use_fn_calling:
         assert scaffold != "sweagent", "SWEagent scaffold does not support fn calling"
-        assert scaffold != "mini_swe_agent", "mini_swe_agent scaffold is non-fn-calling only"
+        assert scaffold not in ["mini_swe_agent", "live_swe_agent"], "mini_swe_agent/live_swe_agent scaffolds are non-fn-calling only"
         agent_args = AgentArgs.from_yaml(
             Path(f"./inference/agenthub/config/{scaffold}/edit_fn_calling.yaml")
         )
@@ -489,9 +489,9 @@ def runagent_multiple(
         max_workers: Maximum number of threads to use.
         prepull_images: Whether to prepull Docker images in parallel before starting execution.
     """
-    # Allow mini_swe_agent as a scaffold
-    assert scaffold in ["r2egym", "sweagent", "openhands", "mini_swe_agent"], (
-        f"Scaffold is {scaffold}, must be one of [r2egym, sweagent, openhands, mini_swe_agent]"
+    # Allow mini_swe_agent/live_swe_agent as scaffolds
+    assert scaffold in ["r2egym", "sweagent", "openhands", "mini_swe_agent", "live_swe_agent"], (
+        f"Scaffold is {scaffold}, must be one of [r2egym, sweagent, openhands, mini_swe_agent, live_swe_agent]"
     )
 
     # Load the dataset
