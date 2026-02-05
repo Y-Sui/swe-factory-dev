@@ -188,6 +188,8 @@ Notes:
 - `--split` is only a label for the local JSON loader; keep it consistent (e.g., `dev`).
 - If you already have local images, you can skip Stage 1 and provide a dataset that
   includes `instance_id`, `docker_image`, `dockerfile`, and `eval_script`.
+- For local swefactory inference, ensure your `docker_image` name contains
+  `swefactory` so the runtime selects swefactory mode.
 - For `r2egym` and `openhands`, you can use either `--use_fn_calling True` or `False`.
   Use `True` only if your model/provider returns tool calls; there is no auto fallback.
 - `--backend` currently supports `docker` only.

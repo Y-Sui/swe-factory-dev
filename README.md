@@ -118,12 +118,15 @@ The validated instances can be filtered using the generated `fail2pass_status.js
 
 ## 📌 Using Your Own Dataset
 
-🎯 Use case 1 (Benchmarking): submit patches and compute resolve rate via
-[evaluation](./evaluation).
+### 🎯 Use Case 1: Benchmarking
 
-🤖 Use case 2 (Agent Inference): You can run coding agents on the SWE environments
-collected by SWE-Factory. We plan to add more agent scaffolds and improve the
-module; PRs are welcome. See [inference/README.md](./inference/README.md) for usage.
+Submit patches and compute resolve rate via [evaluation](./evaluation).
+
+### 🤖 Use Case 2: Agent Inference
+
+You can run coding agents on the SWE environments collected by SWE-Factory. We
+plan to add more agent scaffolds and improve the module; PRs are welcome. See
+[inference/README.md](./inference/README.md) for usage.
 
 ## 📖 Citation
 
