@@ -12,11 +12,12 @@ Your automated factory for GitHub Issue Resolution Training Data and Evaluation 
 </p>
 
 ## 📰 News
+* **[Feb. 5, 2026]**: 🚀 SWE-Factory was used by **Step-3.5-Flash** for large-scale SWE environment construction！ See the [tech report](https://github.com/stepfun-ai/Step-3.5-Flash/blob/main/step_3p5_flash_tech_report.pdf).
+* **[Jan. 31, 2026]**: [DockSmith](https://arxiv.org/pdf/2602.00592) used SWE-Factory as the framework and achieved open-source state-of-the-art performance (39.72%) on [Multi-Docker-Eval](https://arxiv.org/abs/2512.06915) 🔥.
 * **[Jan. 15, 2026]**: We support coding agents inference on SWE-Factory environments. See [docs](./inference/README.md).
 * **[Jan. 5, 2026]**: We release **Awesome-Issue-Resolution**, an awesome list/survey of LLM-based issue resolution research & resources. Check it out [here](https://github.com/DeepSoftwareAnalytics/Awesome-Issue-Resolution).
 * **[Dec. 23, 2025]**: Our paper was accepted to FSE 2026! Check our latest paper [PDF](./preprint.pdf) | [arXiv](https://arxiv.org/abs/2506.10954v3)!
 * **[Sep. 17, 2025]**: *Build your own SWE-GYM with SWE-Factory!* We trained a series of LLMs on 2,809 Python task instances constructed with our framework, all demonstrating effective performance improvements. For instance, the resolve rate of the fine-tuned Qwen2.5-Coder-14B-instruct model increased from 5.8% to 21.0%. The training trajectories sampled from our 2,809 task instances and fine-tuned models are open-sourced on <a href="https://huggingface.co/SWE-Factory">🤗 Huggingface</a>.
-* **[Sep. 15, 2025]**: We release SWE-Factory 1.5, which is more robust and has a higher success rate.
 
 
 ## ✨ Key Features
