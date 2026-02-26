@@ -35,6 +35,24 @@ PR_KEYWORDS = {
     "resolved",
 }
 
+# PR titles matching this pattern are treated as code-change PRs.
+# When such a PR has no linked issue, we fall back to the PR body as problem_statement.
+CODE_CHANGE_TITLE_RE = re.compile(
+    r"(?:^|\W)(?:fix(?:e[sd])?|bug|patch|hotfix|bugfix|feat|refactor|add|support|update|improvement)\b",
+    re.IGNORECASE,
+)
+
+# Sections in PR body that reveal the solution — stripped when building problem_statement.
+_SOLUTION_SECTION_RE = re.compile(
+    r"(?:^|\n)#+\s*(?:what changed\??|solution|implementation|changes made|how)\s*\n.*?(?=\n#+\s|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_COMMENT_RE = re.compile(r"(?s)<!--.*?-->")
+_TEMPLATE_BOILERPLATE_RE = re.compile(
+    r"(?m)^#{1,3}\s*(?:Checklist(?:\s+for\s+PR)?|Must Do|Related Issues?|Screenshots?|Type of Change)\s*$.*?(?=\n#{1,3}\s(?!#)|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+
 def get_language_with_pygments(filename):
     try:
         lexer = get_lexer_for_filename(filename)
@@ -191,8 +209,17 @@ class Repo:
             for word, issue_num in references:
                 if word.lower() in PR_KEYWORDS:
                     resolved_issues_set.add(issue_num)
+
+        # Fallback: bare #N references in PR title (e.g., "Fix crash #97")
+        if not resolved_issues_set:
+            bare_ref_pat = re.compile(r"#(\d+)")
+            title_text = pull['title'] if pull['title'] else ""
+            bare_refs = bare_ref_pat.findall(title_text)
+            for issue_num in bare_refs:
+                resolved_issues_set.add(issue_num)
+
         return list(resolved_issues_set)
-    
+
     def extract_resolved_issues(self, pull: dict) -> list[str]:
         """
         Extract list of issues referenced by a PR
@@ -394,6 +421,81 @@ def extract_problem_statement_and_hints_with_official_github_api(pull: dict, rep
         hint_text = "\n".join(hint_texts)
         all_hint_texts.append(hint_text)
     return text, "\n".join(all_hint_texts) if all_hint_texts else ""
+
+def extract_problem_statement_from_pr(pull: dict, repo: Repo) -> tuple[str, str]:
+    """
+    Fallback: build problem_statement from the PR title + body when no linked issue exists.
+    Strips solution-revealing sections, HTML comments, and template boilerplate so the
+    statement reads like a bug report / feature request rather than a changelog entry.
+
+    Args:
+        pull (dict): PR dictionary object from GitHub
+        repo (Repo): Repo object
+    Return:
+        (problem_statement, hints_text)
+    """
+    title = pull.get("title") or ""
+    body = pull.get("body") or ""
+
+    # Strip HTML comments
+    body = _HTML_COMMENT_RE.sub("", body)
+    # Strip solution-revealing sections
+    body = _SOLUTION_SECTION_RE.sub("", body)
+    # Strip template boilerplate
+    body = _TEMPLATE_BOILERPLATE_RE.sub("", body)
+    # Collapse excessive whitespace
+    body = re.sub(r"\n{3,}", "\n\n", body).strip()
+
+    problem_statement = f"{title}\n\n{body}".strip()
+
+    # Gather hints from PR conversation comments + review summaries
+    hints_text = _fetch_pr_hints(pull, repo)
+
+    return problem_statement, hints_text
+
+
+def _fetch_pr_hints(pull: dict, repo: Repo) -> str:
+    """
+    Fetch hints for PR-body fallback instances (no linked issue).
+
+    Sources:
+      1. PR conversation comments (issue-style, not inline on diff)
+      2. PR review body summaries (top-level review comment, not line comments)
+    """
+    hints_parts = []
+
+    # 1. PR conversation comments
+    try:
+        kwargs = {
+            "call_type": "get_comments",
+            "owner": repo.owner,
+            "repo": repo.name,
+            "token": repo.token,
+            "issue_idx": pull["number"],
+        }
+        comments = repo.call_github_api(**kwargs)
+        for c in comments:
+            body = (c.get("body") or "").strip()
+            if body:
+                hints_parts.append(body)
+    except Exception:
+        pass
+
+    # 2. PR review body summaries
+    try:
+        url = f"https://api.github.com/repos/{repo.owner}/{repo.name}/pulls/{pull['number']}/reviews"
+        resp = repo.github_api(url=url, token=repo.token)
+        if resp is not None:
+            reviews = resp.json()
+            for r in reviews:
+                body = (r.get("body") or "").strip()
+                if body:
+                    hints_parts.append(body)
+    except Exception:
+        pass
+
+    return "\n\n---\n\n".join(hints_parts).strip()
+
 
 def _extract_hints_with_official_github_api(pull: dict, repo: Repo, issue_number: int) -> list[str]:
     """

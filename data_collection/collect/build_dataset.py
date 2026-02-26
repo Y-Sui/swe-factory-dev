@@ -6,7 +6,14 @@ import logging
 import os
 from typing import Optional
 from datetime import datetime
-from utils import Repo, extract_patches, extract_problem_statement_and_hints, extract_problem_statement_and_hints_with_official_github_api
+from utils import (
+    Repo,
+    extract_patches,
+    extract_problem_statement_and_hints,
+    extract_problem_statement_and_hints_with_official_github_api,
+    extract_problem_statement_from_pr,
+    CODE_CHANGE_TITLE_RE,
+)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -38,28 +45,42 @@ def create_instance(repo: Repo, pull: dict, output_path: str, mode: str ='sweben
         with open(successful_path, "a") as f:
             f.write(instance_id + "\n")
 
-    if mode =='swebench':
+    problem_statement_source = "issue"
+    resolved_issues = pull.get("resolved_issues", [])
 
-        problem_statement, hints = extract_problem_statement_and_hints(pull, repo)
+    if resolved_issues:
+        # Standard path: fetch from linked issues
+        if mode == 'swebench':
+            problem_statement, hints = extract_problem_statement_and_hints(pull, repo)
+        else:
+            problem_statement, hints = extract_problem_statement_and_hints_with_official_github_api(pull, repo)
     else:
-        problem_statement, hints = extract_problem_statement_and_hints_with_official_github_api(pull, repo)
+        # Fallback: use PR title + body as problem statement
+        problem_statement, hints = extract_problem_statement_from_pr(pull, repo)
+        problem_statement_source = "pr_body"
+
     return {
         "repo": repo.repo.full_name,
         "pull_number": pull["number"],
         "instance_id": instance_id,
-        "issue_numbers": pull["resolved_issues"],
+        "issue_numbers": resolved_issues,
         "base_commit": pull["base"]["sha"],
         "patch": patch,
         "test_patch": test_patch,
         "problem_statement": problem_statement,
         "hints_text": hints,
         "created_at": pull["created_at"],
+        "problem_statement_source": problem_statement_source,
     }
 
 
 def is_valid_pull(pull: dict) -> bool:
     """
-    Check whether PR has an associated issue and is merged
+    Check whether PR is a candidate for task-instance creation.
+
+    Tier 1: merged + has linked issues  (original strict path)
+    Tier 2: merged + PR title indicates a code change  (fallback for repos
+            that don't use "fixes #N" conventions)
 
     Args:
         pull (dict): pull request object
@@ -67,13 +88,15 @@ def is_valid_pull(pull: dict) -> bool:
         bool: whether PR is valid
     """
     if pull["merged_at"] is None:
-        # logger.info(f" not merged")
         return False
-    if "resolved_issues" not in pull or len(pull["resolved_issues"]) < 1:
-        # logger.info(f"no resolved_issues")
-        return False
-
-    return True
+    # Tier 1: has linked issues (original)
+    if pull.get("resolved_issues") and len(pull["resolved_issues"]) >= 1:
+        return True
+    # Tier 2: PR title indicates code change (fallback)
+    title = pull.get("title", "")
+    if CODE_CHANGE_TITLE_RE.search(title):
+        return True
+    return False
 
 
 def is_valid_instance(instance: dict) -> bool:

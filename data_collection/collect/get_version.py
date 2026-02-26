@@ -28,13 +28,30 @@ def get_version_by_git(cloned_dir: str) -> str:
     if not os.path.isdir(cloned_dir):
         raise NotADirectoryError(f"Invalid directory: {cloned_dir}")
     with cd(cloned_dir):
-        result = run_command(["git", "describe", "--tags"], capture_output=True, text=True)
-        version = result.stdout.strip()
-        print(f"✔️ Current version: {version}")
-        match = re.search(r"(\d+\.\d+)(?:\.\d+)?", version)
-        if match:
-            return match.group(1)
-        raise RuntimeError(f"Unrecognized version: {version}")
+        try:
+            result = run_command(["git", "describe", "--tags"], capture_output=True, text=True)
+            version = result.stdout.strip()
+            match = re.search(r"(\d+\.\d+)(?:\.\d+)?", version)
+            if match:
+                print(f"Version from tag: {match.group(1)}")
+                return match.group(1)
+        except subprocess.CalledProcessError:
+            pass
+        # Fallback for repos without tags: use commit date as version (YYYY.MM)
+        try:
+            result = run_command(
+                ["git", "log", "-1", "--format=%cd", "--date=format:%Y.%m"],
+                capture_output=True, text=True,
+            )
+            version = result.stdout.strip()
+            if version:
+                print(f"Version from commit date: {version}")
+                return version
+        except subprocess.CalledProcessError:
+            pass
+        # Last resort
+        print("No tags or commits found, using 0.0")
+        return "0.0"
 
 def get_instances(instance_path: str) -> List[Dict]:
     if instance_path.endswith((".jsonl", ".jsonl.all")):
@@ -43,15 +60,21 @@ def get_instances(instance_path: str) -> List[Dict]:
     with open(instance_path, encoding="utf-8") as f:
         return json.load(f)
 
-def prepare_repo_cache(tasks: List[Dict], cache_dir: str) -> Dict[str, str]:
+def prepare_repo_cache(tasks: List[Dict], cache_dir: str, token: str = None) -> Dict[str, str]:
     os.makedirs(cache_dir, exist_ok=True)
     repo_cache = {}
     for task in tasks:
         repo = task["repo"]
         if repo in repo_cache:
             continue
-        repo_url = f"https://github.com/{repo}.git"
+        if token:
+            repo_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+        else:
+            repo_url = f"https://github.com/{repo}.git"
         local_path = os.path.join(cache_dir, repo.replace("/", "__"))
+        if os.path.isdir(local_path):
+            repo_cache[repo] = local_path
+            continue
         try:
             run_command(["git", "clone", repo_url, local_path], capture_output=True)
             repo_cache[repo] = local_path
@@ -115,6 +138,10 @@ def save_results(results: List[Dict], output_path: str):
             json.dump(results, f, indent=2, ensure_ascii=False)
 
 def generate_output_path(instance_path: str, suffix="_versions") -> str:
+    # Handle compound extensions like .jsonl.all
+    if instance_path.endswith(".jsonl.all"):
+        base = instance_path[: -len(".jsonl.all")]
+        return f"{base}{suffix}.jsonl.all"
     base, ext = os.path.splitext(instance_path)
     return f"{base}{suffix}{ext}"
 
@@ -123,12 +150,15 @@ def main():
     parser.add_argument("--instance_path", type=str, required=True, help="Path to input task file (.json or .jsonl)")
     parser.add_argument("--testbed", type=str, required=True, help="Temp working directory for cloning repos")
     parser.add_argument("--max-workers", type=int, default=10, help="Number of processes (default: 4)")
+    parser.add_argument("--token", type=str, default=None, help="GitHub token for cloning private repos")
     args = parser.parse_args()
+
+    token = args.token or os.environ.get("GITHUB_TOKEN")
 
     try:
         tasks = get_instances(args.instance_path)
     except Exception as e:
-        print(f"❌ Error reading instance file: {e}")
+        print(f"Error reading instance file: {e}")
         return
 
     required_keys = {"repo", "base_commit", "instance_id"}
@@ -138,7 +168,7 @@ def main():
             return
 
     repo_cache_dir = os.path.join(args.testbed, "_cache")
-    repo_cache = prepare_repo_cache(tasks, repo_cache_dir)
+    repo_cache = prepare_repo_cache(tasks, repo_cache_dir, token=token)
 
     results, failures = process_repos(tasks, args.testbed, repo_cache, args.max_workers)
 

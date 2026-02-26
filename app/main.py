@@ -385,7 +385,7 @@ def load_tasks_map(tasks_map_file: str):
     Load a .jsonl or .json file and return a dict: {instance_id: instance_dict}, with original fields only.
     """
     # Detect file type and load raw instances
-    if tasks_map_file.endswith('.jsonl'):
+    if tasks_map_file.endswith('.jsonl') or tasks_map_file.endswith('.jsonl.all'):
         with open(tasks_map_file, 'r', encoding='utf-8') as f:
             instances = [json.loads(line) for line in f if line.strip()]
     else:
@@ -721,7 +721,7 @@ def do_inference(
     task_output_dir: str,
     print_callback: Callable[[dict], None] | None = None,
 ) -> bool:
-    client = docker.from_env()
+    client = None if globals.disable_run_test else docker.from_env()
     apputils.create_dir_if_not_exists(task_output_dir)
     # github_link = f'https://github.com/{python_task.repo_name}.git'
     commit_hash = python_task.commit
