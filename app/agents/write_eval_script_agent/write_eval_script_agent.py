@@ -42,6 +42,7 @@ class WriteEvalScriptAgent(Agent):
         )
         if self.download_test_resources_commands != []:
             self.test_patch = self.get_remove_binary_patch()
+        self.generated_test_files = []
         self.initial_skeleton = self.get_initial_eval_script_skeleton()
         self.run_count = 0
         self.repo_basic_info = repo_basic_info
@@ -88,25 +89,36 @@ class WriteEvalScriptAgent(Agent):
     def get_initial_eval_script_skeleton(self):
         HEREDOC_DELIMITER = "EOF_114329324912"
         test_files = self.test_files
-        reset_test_files = ['"' + t + '"' for t in test_files]
-        # Reset test files to the state they should be in before the patch.
-        reset_tests_command = f"git checkout {self.task.commit} {' '.join(reset_test_files)}"
         apply_test_patch_command = (
             f"git apply -v - <<'{HEREDOC_DELIMITER}'\n[CONTENT OF TEST PATCH]\n{HEREDOC_DELIMITER}"
         )
-        # apply_test_patch_command = (
-        #     f"git apply -v - <<'{HEREDOC_DELIMITER}'\n{self.test_patch}\n{HEREDOC_DELIMITER}"
-        # )
-        
+
+        # Separate existing (repo) test files from generated (new) test files
+        gen_set = set(self.generated_test_files)
+        existing_files = [f for f in test_files if f not in gen_set]
+        generated_files = [f for f in test_files if f in gen_set]
+        quoted_existing = ['"' + t + '"' for t in existing_files]
+        quoted_generated = ['"' + t + '"' for t in generated_files]
+
         eval_commands = [
             f"cd /testbed",
         ]
+
+        # Pre-reset: only for existing files that are already in the repo
+        if quoted_existing:
+            eval_commands.append(f"git checkout {self.task.commit} {' '.join(quoted_existing)}")
+
         eval_commands += [
-            reset_tests_command,
             *self.download_test_resources_commands,
             apply_test_patch_command,
-            reset_tests_command,  # Revert tests after done
         ]
+
+        # Post-cleanup: git checkout for existing files, rm -f for generated files
+        if quoted_existing:
+            eval_commands.append(f"git checkout {self.task.commit} {' '.join(quoted_existing)}")
+        if quoted_generated:
+            eval_commands.append("rm -f " + " ".join(quoted_generated))
+
         return "\n".join(["#!/bin/bash", "set -uxo pipefail"] + eval_commands) + "\n"
 
     def get_latest_eval_script_skeleton(self) -> str:

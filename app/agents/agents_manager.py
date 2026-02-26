@@ -4,6 +4,7 @@ from app.agents.write_dockerfile_agent import WriteDockerfileAgent
 from app.agents.test_analysis_agent import TestAnalysisAgent
 from app.agents.write_eval_script_agent import WriteEvalScriptAgent
 from app.agents.context_retrieval_agent import ContextRetrievalAgent
+from app.agents.write_test_agent import WriteTestAgent
 import os
 import re
 import docker
@@ -75,6 +76,9 @@ class AgentsManager:
             "context_retrieval_agent": ContextRetrievalAgent(task, output_dir, self.repo_basic_info),
         }
         self.set_agent_status('all',False)
+        self.needs_test_generation = len(self.test_files) < 3
+        if self.needs_test_generation:
+            self.agents_dict["write_test_agent"] = WriteTestAgent(task, output_dir, self.repo_basic_info)
         self.disable_memory_pool = disable_memory_pool
         self.disable_context_retrieval = disable_context_retrieval
         self.disable_run_test = disable_run_test
@@ -195,7 +199,31 @@ class AgentsManager:
                     self.set_agent_status("context_retrieval_agent",True)
                     self.agents_dict['write_eval_script_agent'].add_user_message(collected_information)
                     self.agents_dict['write_docker_agent'].add_user_message(collected_information)
-                    
+                    if self.needs_test_generation:
+                        self.agents_dict['write_test_agent'].add_user_message(collected_information)
+
+            # Run WriteTestAgent if test_patch is empty and context retrieval is done
+            if self.needs_test_generation and self.get_agent_status("context_retrieval_agent") \
+                    and not self.get_agent_status("write_test_agent"):
+                _, _, success = self.agents_dict['write_test_agent'].run_task()
+                self.dump_cost()
+                if success:
+                    self.set_agent_status("write_test_agent", True)
+                    # Inject generated test_patch into WriteEvalScriptAgent
+                    gen_patch = self.agents_dict['write_test_agent'].get_generated_test_patch()
+                    gen_files = self.agents_dict['write_test_agent'].get_generated_test_files()
+                    eval_agent = self.agents_dict['write_eval_script_agent']
+                    # Combine existing test_patch with generated patch
+                    existing_patch = eval_agent.test_patch.strip()
+                    if existing_patch:
+                        eval_agent.test_patch = existing_patch + "\n" + gen_patch
+                        eval_agent.test_files = eval_agent.test_files + gen_files
+                    else:
+                        eval_agent.test_patch = gen_patch
+                        eval_agent.test_files = gen_files
+                    eval_agent.generated_test_files = gen_files
+                    eval_agent.initial_skeleton = eval_agent.get_initial_eval_script_skeleton()
+
             if self.disable_memory_pool == False:        
                 reference_setup = self.get_latest_reference_setup_for_repo()
                 if reference_setup:
@@ -210,7 +238,9 @@ class AgentsManager:
                     self.set_agent_status("write_docker_agent",True)
           
 
-            if self.get_agent_status("context_retrieval_agent") and self.get_agent_status("write_docker_agent") and not self.get_agent_status("write_eval_script_agent"):
+            test_gen_ready = (not self.needs_test_generation or self.get_agent_status("write_test_agent"))
+            if self.get_agent_status("context_retrieval_agent") and self.get_agent_status("write_docker_agent") \
+                    and test_gen_ready and not self.get_agent_status("write_eval_script_agent"):
                 self.agents_dict['write_eval_script_agent'].dockerfile =  self.agents_dict['write_docker_agent'].get_latest_dockerfile()
                 _, _, success =  self.agents_dict['write_eval_script_agent'].run_task()
                 self.dump_cost()
@@ -280,6 +310,15 @@ class AgentsManager:
                         prefix_prompt = "After analysis, you need modify the eval script. Here is the analysis:\n"
                     self.set_agent_status("write_eval_script_agent",False)
                     self.agents_dict['write_eval_script_agent'].add_user_message(f'{prefix_prompt}{guidance_for_write_eval_script_agent}\n\n')
+
+                if self.needs_test_generation:
+                    guidance_for_write_test_agent = analysis.get("guidance_for_write_test_agent", None)
+                    if guidance_for_write_test_agent:
+                        prefix_prompt = "After analysis, the generated tests need improvement. Here is the feedback:\n"
+                        self.set_agent_status("write_test_agent", False)
+                        self.set_agent_status("write_eval_script_agent", False)
+                        self.agents_dict['write_test_agent'].add_user_message(
+                            f'{prefix_prompt}{guidance_for_write_test_agent}\n\n')
 
         else:
             log_msg = "Exceed largest number of tries.."
