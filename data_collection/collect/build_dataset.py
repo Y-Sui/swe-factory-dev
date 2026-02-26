@@ -62,6 +62,7 @@ def create_instance(repo: Repo, pull: dict, output_path: str, mode: str ='sweben
     return {
         "repo": repo.repo.full_name,
         "pull_number": pull["number"],
+        "pull_url": pull.get("html_url") or pull.get("url"),
         "instance_id": instance_id,
         "issue_numbers": resolved_issues,
         "base_commit": pull["base"]["sha"],
