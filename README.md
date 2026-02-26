@@ -66,22 +66,82 @@ python app/main.py swe-bench \
 
 We employ SWE-Builder, an LLM-based multi-agent system consisting of:
 
-1. **🔍 Repository Explorer**
+1. **🔍 Repository Explorer** (`ContextRetrievalAgent`)
    - Gathers environment setup and test commands automatically.
 
-2. **🐳 Environment Manager**
+2. **🧪 Test Generator** (`WriteTestAgent`) — *NEW*
+   - When `test_patch` is missing or insufficient (< 3 test files), generates pytest-compatible test files from the problem statement and code patch using LLM.
+
+3. **🐳 Environment Manager** (`WriteDockerfileAgent`)
    - Generates Dockerfiles for reproducible test environments.
 
-3. **📝 Test Manager**
+4. **📝 Test Manager** (`WriteEvalScriptAgent`)
    - Writes evaluation scripts to run tests inside containers.
 
-4. **🔬 Test Analyst**
+5. **🔬 Test Analyst** (`TestAnalysisAgent`)
    - Validates generated environments and orchestrates iterative refinement.
 
-5. **💾 Evaluation Environment Memory Pool**
+6. **💾 Evaluation Environment Memory Pool**
    - Reuses previously successful setups for efficiency and consistency.
 
 ![Overview](figure/overview.png)
+
+#### SWE-Builder Agent Loop
+
+```mermaid
+flowchart TD
+    Start([Task Instance]) --> CR
+
+    subgraph Phase1["Phase 1: Information Gathering"]
+        CR["🔍 Repository Explorer\n(ContextRetrievalAgent)"]
+    end
+
+    CR --> NeedTests{test_patch\nhas < 3 files?}
+
+    NeedTests -- Yes --> WT
+    NeedTests -- No --> DF
+
+    subgraph Phase2["Phase 2: Test Generation (Conditional)"]
+        WT["🧪 Test Generator\n(WriteTestAgent)\n\nGenerates pytest files from\nproblem_statement + patch"]
+    end
+
+    WT --> InjectPatch[/"Inject generated test_patch\ninto EvalScript agent"/]
+    InjectPatch --> DF
+
+    subgraph Phase3["Phase 3: Environment Setup"]
+        DF["🐳 Environment Manager\n(WriteDockerfileAgent)\n\nGenerates Dockerfile"]
+        ES["📝 Test Manager\n(WriteEvalScriptAgent)\n\nGenerates eval.sh"]
+        DF --> ES
+    end
+
+    subgraph Phase4["Phase 4: Validation"]
+        TA["🔬 Test Analyst\n(TestAnalysisAgent)\n\nReviews Dockerfile + eval.sh\n(optionally runs tests in Docker)"]
+    end
+
+    ES --> TA
+
+    TA --> IsFinish{is_finish?}
+    IsFinish -- Yes --> Done([Output:\nDockerfile + eval.sh])
+
+    IsFinish -- No --> Feedback
+
+    subgraph Feedback["Feedback Routing"]
+        direction LR
+        G_CR["guidance_for\ncontext_retrieval_agent"]
+        G_DF["guidance_for\nwrite_dockerfile_agent"]
+        G_ES["guidance_for\nwrite_eval_script_agent"]
+        G_WT["guidance_for\nwrite_test_agent"]
+    end
+
+    G_CR -. "re-run" .-> CR
+    G_DF -. "re-run" .-> DF
+    G_ES -. "re-run" .-> ES
+    G_WT -. "re-run\n(also resets EvalScript)" .-> WT
+
+    MP[("💾 Memory Pool\n(prior successful setups)")] -. "reference" .-> DF
+    MP -. "reference" .-> ES
+    Done -. "update" .-> MP
+```
 
 #### 📊 SWE-Builder Evaluation Results
 

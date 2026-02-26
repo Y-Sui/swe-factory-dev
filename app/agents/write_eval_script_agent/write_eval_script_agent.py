@@ -52,7 +52,8 @@ class WriteEvalScriptAgent(Agent):
 
 
     def get_test_files(self):
-        test_files = re.findall(DIFF_MODIFIED_FILE_REGEX, self.test_patch)
+        patch = self.test_patch or ""
+        test_files = re.findall(DIFF_MODIFIED_FILE_REGEX, patch)
         return test_files
         
     def init_msg_thread(self) -> None:
@@ -99,6 +100,8 @@ class WriteEvalScriptAgent(Agent):
         generated_files = [f for f in test_files if f in gen_set]
         quoted_existing = ['"' + t + '"' for t in existing_files]
         quoted_generated = ['"' + t + '"' for t in generated_files]
+        gen_dirs = sorted({os.path.dirname(f) for f in generated_files if os.path.dirname(f)})
+        quoted_gen_dirs = ['"' + d + '"' for d in gen_dirs]
 
         eval_commands = [
             f"cd /testbed",
@@ -108,10 +111,11 @@ class WriteEvalScriptAgent(Agent):
         if quoted_existing:
             eval_commands.append(f"git checkout {self.task.commit} {' '.join(quoted_existing)}")
 
-        eval_commands += [
-            *self.download_test_resources_commands,
-            apply_test_patch_command,
-        ]
+        eval_commands += [*self.download_test_resources_commands]
+        if quoted_gen_dirs:
+            eval_commands.append("mkdir -p " + " ".join(quoted_gen_dirs))
+        if self.test_patch and self.test_patch.strip():
+            eval_commands.append(apply_test_patch_command)
 
         # Post-cleanup: git checkout for existing files, rm -f for generated files
         if quoted_existing:

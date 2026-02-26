@@ -19,9 +19,10 @@ export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 SCRIPT_DIR="data_collection/collect"
 DATA_DIR="../internal-swe-bench-data"
 SETUP_DIR="testbed"
-MODEL="anthropic/claude-sonnet-4.5"
+# MODEL="anthropic/claude-sonnet-4.5"
+MODEL="google/gemini-2.5-flash"
 ROUND=5
-NUM_PROCS=3
+NUM_PROCS=8
 
 REPOS=(
   "MiroMindAI__MiroThinker"
@@ -31,10 +32,27 @@ REPOS=(
 # Step 1: Add version info to instances (required by Stage II)
 for REPO in "${REPOS[@]}"; do
   INSTANCE_FILE="$DATA_DIR/$REPO/instances.jsonl.all"
-  VERSIONED_FILE="$DATA_DIR/$REPO/instances_versions.jsonl.all"
 
-  if [ -f "$VERSIONED_FILE" ]; then
-    echo "=== Versions already exist for $REPO, skipping ==="
+  if python - "$INSTANCE_FILE" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            if "version" in obj:
+                sys.exit(0)
+            break
+except FileNotFoundError:
+    pass
+sys.exit(1)
+PY
+  then
+    echo "=== Versions already exist in $INSTANCE_FILE, skipping ==="
     continue
   fi
 
@@ -42,12 +60,13 @@ for REPO in "${REPOS[@]}"; do
   python "$SCRIPT_DIR/get_version.py" \
     --instance_path "$INSTANCE_FILE" \
     --testbed "$SETUP_DIR" \
-    --max-workers 10
+    --max-workers 10 \
+    --in-place
 done
 
 # Step 2: Run the multi-agent env setup (Dockerfile + eval.sh generation)
 for REPO in "${REPOS[@]}"; do
-  TASKS_MAP="$DATA_DIR/$REPO/instances_versions.jsonl.all"
+  TASKS_MAP="$DATA_DIR/$REPO/instances.jsonl.all"
   OUT_DIR="$DATA_DIR/$REPO/setup_output"
   RESULT_DIR="$DATA_DIR/$REPO/setup_output/results"
   mkdir -p "$OUT_DIR" "$RESULT_DIR"

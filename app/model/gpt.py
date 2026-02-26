@@ -406,6 +406,10 @@ class Gemini_2_5_flash_preview(OpenaiModel):
     def __init__(self):
         super().__init__("google/gemini-2.5-flash-preview", 16384, 0.00000015, 0.0000006)
 
+class Gemini_2_5_flash(OpenaiModel):
+    def __init__(self):
+        super().__init__("google/gemini-2.5-flash", 16384, 0.00000015, 0.0000006)
+
 class Gemini_2_5_flash_lite_preview(OpenaiModel):
     def __init__(self):
         super().__init__("google/gemini-2.5-flash-lite-preview-06-17", 8192, 0.00000010, 0.0000004)
@@ -418,7 +422,12 @@ class Qwen25_72B(OpenaiModel):
     def __init__(self):
         super().__init__("Qwen/Qwen2.5-72B-Instruct-128K", 4096,0.00000057,  0.00000057)
         self.note = "Qwen2.5-72B."
-        
+
+class Qwen35_Flash(OpenaiModel):
+    def __init__(self):
+        super().__init__("qwen/qwen3.5-flash-02-23", 8192, 0.00000014, 0.00000028)
+        self.note = "Qwen3.5-Flash."
+
 class DeepSeekV25(OpenaiModel):
     def __init__(self):
         super().__init__("deepseek-chat", 4096,0.00000014,  0.00000028)

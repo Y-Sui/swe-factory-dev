@@ -26,6 +26,27 @@ from os.path import join as pjoin
 import traceback
 MAX_LINE_NUM = 600
 ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+EXIT_CODE_RE = re.compile(r"OMNIGRIL_EXIT_CODE=(\d+)")
+
+def _extract_exit_code(test_output: str) -> int | None:
+    """Extract the exit code from test output; returns None if not found."""
+    m = EXIT_CODE_RE.search(test_output)
+    return int(m.group(1)) if m else None
+
+def classify_f2p(pre_exit: int | None, post_exit: int | None) -> str:
+    """Classify Fail-to-Pass result from pre-patch and post-patch exit codes."""
+    if pre_exit is None or post_exit is None:
+        return "ERROR"
+    pre_pass = (pre_exit == 0)
+    post_pass = (post_exit == 0)
+    if not pre_pass and post_pass:
+        return "FAIL2PASS"
+    elif pre_pass and post_pass:
+        return "PASS2PASS"
+    elif not pre_pass and not post_pass:
+        return "FAIL2FAIL"
+    else:  # pre_pass and not post_pass
+        return "PASS2FAIL"
 class TestAnalysisAgent(Agent):
     """
     Agent responsible for:
@@ -55,6 +76,7 @@ class TestAnalysisAgent(Agent):
         self.timeout = 3600
         self.disable_context_retrieval = False
         self.disable_run_test = False
+        self.f2p_classification = None
         # self.init_msg_thread()
 
 
@@ -121,6 +143,36 @@ class TestAnalysisAgent(Agent):
         
         return f'Test log (showing first {head_size} & last {tail_size} lines):\n{truncated_log}\n\n'
 
+    def get_latest_prev_test_log(self) -> str:
+        """Read the latest test_output_prev_apply.txt produced by pre-patch run."""
+        test_dir = self.get_latest_test_analysis_output_dir()
+        path = os.path.join(test_dir, "test_output_prev_apply.txt")
+        try:
+            return Path(path).read_text()
+        except FileNotFoundError:
+            return ""
+
+    def get_prev_test_log_with_line_numbers(self) -> str:
+        test_log = self.get_latest_prev_test_log()
+        if not test_log:
+            return ""
+        lines = test_log.splitlines()
+        width = len(str(len(lines)))
+        full_formatted = [f"{i + 1:>{width}}   {line}" for i, line in enumerate(lines)]
+
+        if len(full_formatted) <= MAX_LINE_NUM:
+            log_body = "\n".join(full_formatted)
+            return f'Pre-patch test log (without gold patch applied):\n{log_body}\n\n'
+
+        head_size = MAX_LINE_NUM // 2
+        tail_size = MAX_LINE_NUM - head_size
+        head = full_formatted[:head_size]
+        tail = full_formatted[-tail_size:]
+        omission = " " * width + "   [..., {} lines omitted ...]".format(
+            len(full_formatted) - head_size - tail_size)
+        truncated_log = "\n".join(head + [omission] + tail)
+        return f'Pre-patch test log (showing first {head_size} & last {tail_size} lines):\n{truncated_log}\n\n'
+
     def run_task(self, disable_context_retrieval= False, print_callback=None) -> tuple[str, str, bool]:
         """
         2. Read and format the test log
@@ -128,6 +180,11 @@ class TestAnalysisAgent(Agent):
         4. Invoke agent_analyze_test_log.run_with_retries(...)
         5. Return (tool_output, summary, ok)
         """
+        if self.disable_run_test:
+            raise RuntimeError(
+                "disable_run_test is True; refusing to build docker or run tests. "
+                "Call run_task_without_run_test instead."
+            )
         self.init_msg_thread()
         print_banner(f"Task {self.task.task_id} Iteration ROUND {self.iteration_num} Try to setup docker and run tests ")
         
@@ -156,6 +213,20 @@ class TestAnalysisAgent(Agent):
             test_log = self.get_test_log_with_line_numbers()
             # self.add_user_message(f'Eval script (We omit details of test patch):\n{self.eval_script_skeleton}\n\n')
             self.add_user_message(test_log)
+            # Add pre-patch test log and F2P classification
+            prev_test_log = self.get_prev_test_log_with_line_numbers()
+            if prev_test_log:
+                self.add_user_message(prev_test_log)
+            if self.f2p_classification:
+                f2p_msg = (
+                    f"F2P Validation Result: {self.f2p_classification}\n"
+                    "- FAIL2PASS: Tests fail without gold patch and pass with it. This is the desired outcome.\n"
+                    "- PASS2PASS: Tests pass both without and with the gold patch. The tests are too weak and do not capture the bug.\n"
+                    "- FAIL2FAIL: Tests fail both without and with the gold patch. There is likely an environment or test setup issue.\n"
+                    "- PASS2FAIL: Tests pass without but fail with the gold patch. The tests are broken or inverted.\n"
+                    "- ERROR: Could not determine exit codes from one or both test runs.\n"
+                )
+                self.add_user_message(f2p_msg)
         else:
             logger.error(tool_output)
             logger.error('some problem in running tests')
@@ -187,6 +258,8 @@ class TestAnalysisAgent(Agent):
             to_save = {}
 
         to_save['build_image_status'] = build_image_status
+        if self.f2p_classification:
+            to_save['f2p_classification'] = self.f2p_classification
 
         if task_output is None:
             summary = "The tool returned nothing. The main agent probably did not provide enough clues."
@@ -277,6 +350,10 @@ class TestAnalysisAgent(Agent):
         client
     ):
         """Build Docker image with detailed logging and error handling."""
+        if self.disable_run_test:
+            raise RuntimeError(
+                "disable_run_test is True; refusing to build docker image."
+            )
     
         
         build_image_logger.info(
@@ -432,13 +509,14 @@ class TestAnalysisAgent(Agent):
         cur_test_dir = self.get_latest_test_analysis_output_dir()
         os.makedirs(cur_test_dir, exist_ok=True)
         run_test_logger = setup_logger(self.task_id, Path(f'{cur_test_dir}/run_test.log'))
-        # test_image_name = f"{self.task_id}:latest_{self.setup_dockerfile_num}"
         test_image_name = f"{self.task_id}-dockerfile{self.setup_dockerfile_num}:latest"
-        # test_container_name =  f"{self.task_id}:test_{self.run_test_num}"
         test_container_name = f"{self.task_id}-test{self.run_test_num}"
         instance_id = self.task_id
         container = None
         test_output_path = f'{cur_test_dir}/test_output.txt'
+        prev_test_output_path = f'{cur_test_dir}/test_output_prev_apply.txt'
+        pre_exit_code = None
+        post_exit_code = None
         try:
             container = build_container(self.client,test_image_name,test_container_name,instance_id,run_test_logger)
 
@@ -446,6 +524,44 @@ class TestAnalysisAgent(Agent):
             run_test_logger.info(f"Container for {instance_id} started: {container.id}")
             tool_output += f"Container {container.id} started.\n"
             summary += "Container started.\n"
+
+            # === Phase 1: Pre-patch run (without gold patch) ===
+            try:
+                run_test_logger.info("=== F2P Phase 1: Running tests WITHOUT gold patch ===")
+                eval_file = Path(f"{self.get_latest_test_analysis_output_dir()}/eval.sh")
+                eval_file.write_text(eval_script)
+                copy_to_container(container, eval_file, Path("/eval.sh"))
+
+                pre_result = exec_run_with_timeout(container, "/bin/bash /eval.sh", timeout=self.timeout)
+                pre_test_output = pre_result.decode("utf-8")
+
+                with open(prev_test_output_path, "w") as f:
+                    f.write(pre_test_output)
+                run_test_logger.info(f"Pre-patch test output written to {prev_test_output_path}")
+
+                pre_exit_code = _extract_exit_code(pre_test_output)
+                run_test_logger.info(f"Pre-patch exit code: {pre_exit_code}")
+                tool_output += f"Pre-patch test run completed (exit code: {pre_exit_code}).\n"
+            except Exception as e:
+                run_test_logger.warning(f"Pre-patch test run failed: {e}. Continuing with post-patch run.")
+                tool_output += f"Pre-patch test run failed: {e}. Continuing.\n"
+
+            # === Reset container state for post-patch run ===
+            run_test_logger.info("Resetting container state for post-patch run...")
+            container.exec_run(
+                f"git reset --hard {self.task.commit}",
+                workdir="/testbed",
+                user="root",
+            )
+            container.exec_run(
+                "git clean -fdx",
+                workdir="/testbed",
+                user="root",
+            )
+            run_test_logger.info("Container state reset complete.")
+
+            # === Phase 2: Post-patch run (with gold patch) ===
+            run_test_logger.info("=== F2P Phase 2: Running tests WITH gold patch ===")
             # Copy model prediction as patch file to container
             patch_file = Path(f"{cur_test_dir}/patch.diff")
             patch_file.write_text(patch or "")
@@ -454,7 +570,7 @@ class TestAnalysisAgent(Agent):
             )
             copy_to_container(container, patch_file, Path("/tmp/patch.diff"))
 
-        
+
             # Attempt to apply patch to container
             val = container.exec_run(
                 "git apply -p1 -v /tmp/patch.diff",
@@ -492,20 +608,19 @@ class TestAnalysisAgent(Agent):
             )
             run_test_logger.info(f"Git diff before:\n{git_diff_output_before}")
 
-            eval_file = Path(f"{self.get_latest_test_analysis_output_dir()}/eval.sh")
-            eval_file.write_text(eval_script)
-            run_test_logger.info(
-                f"Eval script for {instance_id} written to {patch_file}, now applying to container..."
-            )
+            # Re-copy eval.sh (in case pre-patch run modified it)
             copy_to_container(container, eval_file, Path("/eval.sh"))
 
             # Run eval script, write output to logs
             result = exec_run_with_timeout(container, "/bin/bash /eval.sh", timeout=self.timeout)
             test_output = result.decode("utf-8")
-            
+
             with open(test_output_path, "w") as f:
                 f.write(test_output)
             run_test_logger.info(f"Test output for {instance_id} written to {test_output_path}")
+
+            post_exit_code = _extract_exit_code(test_output)
+            run_test_logger.info(f"Post-patch exit code: {post_exit_code}")
 
             # Get git diff after running eval script
             git_diff_output_after = (
@@ -519,6 +634,11 @@ class TestAnalysisAgent(Agent):
                 tool_output += "Note: Git diff changed after test execution.\n"
                 summary += "Git diff changed.\n"
 
+            # === F2P Classification ===
+            self.f2p_classification = classify_f2p(pre_exit_code, post_exit_code)
+            run_test_logger.info(f"F2P classification: {self.f2p_classification} (pre={pre_exit_code}, post={post_exit_code})")
+            tool_output += f"F2P classification: {self.f2p_classification}\n"
+
         except EvaluationError as e:
             error_msg = (f"EvaluationError {instance_id}: {e}\n"
                         f"{traceback.format_exc()}\n"
@@ -527,7 +647,7 @@ class TestAnalysisAgent(Agent):
             tool_output += error_msg + "\n"
             summary += "Evaluation error occurred.\n"
             success = False
-           
+
         except Exception as e:
             error_msg = (f"Error in evaluating model for {instance_id}: {e}\n"
                         f"{traceback.format_exc()}\n"
@@ -547,10 +667,10 @@ class TestAnalysisAgent(Agent):
                 success = True
 
         finally:
-           
+
             # Remove instance container + image, close logger
             cleanup_container(self.client, container,run_test_logger)
-            
+
             remove_image(self.client, test_image_name, run_test_logger)
             close_logger(run_test_logger)
         self.dump_tool_sequence(self.get_latest_test_analysis_output_dir())

@@ -577,6 +577,7 @@ Only investigate the following areas **if explicitly requested** by the calling 
 - The repository has already been **cloned locally**; you are working within the local repository directory.  
 - You are **not expected to search broadly**; retrieve only the files and information explicitly requested by the calling agent.  
 - Avoid redundant or speculative searches—**be goal-driven and cost-efficient**.  
+- It is **common for this benchmark that no tests or test configs exist in the repo**. If you do not find tests, **state that clearly and stop searching**. Do **not** keep hunting for `pytest.ini`, `tox.ini`, or `conftest.py` after an initial check.
 """
 
 
@@ -586,5 +587,5 @@ USER_PROMPT = (
         "\n- browse_file_for_environment_info(file_path: str, custom_query: str): Call an agent to browse a file such as README or CONTRIBUTING.md and extract environment setup and running tests information. Use the `custom_query` parameter to tell the agent any extra details it should pay special attention to (for example, 'what java version do we need?')."
         "\n- search_files_by_keyword(keyword: str): Search for files in the repository whose names contain the given keyword."
         "\n\nYou may invoke multiple APIs in one round as needed to gather the required information."
-        "\n\nNow analyze the repository and use the necessary APIs to gather the information required to understand and set up the environment. Ensure each API call has concrete arguments as inputs."
+        "\n\nNow analyze the repository and use the necessary APIs to gather the information required to understand and set up the environment. If you cannot find tests or test configs after a quick, minimal check, report that and stop. Ensure each API call has concrete arguments as inputs."
         )

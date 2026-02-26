@@ -60,7 +60,7 @@ class WriteTestAgent(Agent):
 
         # Include existing test_patch info if available (small but non-empty)
         existing_test_info = ""
-        if self.task.test_patch.strip():
+        if (self.task.test_patch or "").strip():
             existing_test_info = write_test_utils.summarize_large_patch(self.task.test_patch)
 
         # Build user prompt

@@ -79,6 +79,7 @@ class AgentsManager:
         self.needs_test_generation = len(self.test_files) < 3
         if self.needs_test_generation:
             self.agents_dict["write_test_agent"] = WriteTestAgent(task, output_dir, self.repo_basic_info)
+            self.set_agent_status("write_test_agent", False)
         self.disable_memory_pool = disable_memory_pool
         self.disable_context_retrieval = disable_context_retrieval
         self.disable_run_test = disable_run_test
@@ -127,7 +128,7 @@ class AgentsManager:
         2) Extract newly added files via the '/dev/null' pattern
         3) Return combined list in patch order (no dedup)
         """
-        patch = self.task.test_patch
+        patch = self.task.test_patch or ""
 
         old_paths = re.findall(DIFF_MODIFIED_FILE_REGEX, patch)
         new_paths = re.findall(DIFF_DEVNULL_REGEX,   patch)
@@ -272,48 +273,96 @@ class AgentsManager:
 
 
                 is_finish = analysis.get("is_finish", None)
+
+                # F2P safety gate: only accept is_finish=True if F2P is FAIL2PASS
+                test_analysis_agent = self.agents_dict['test_analysis_agent']
+                f2p = getattr(test_analysis_agent, 'f2p_classification', None)
+
                 if is_finish:
-                    self.workflow_finish_status = True
-                    break
-                
-                # write dockerile + eval script + build contaier + run eval script
-                # collect feedback (image error + test error)
-                # image error: 1. modify dockerfile directly
-                #              2. go to context retrieval  agent for more information.
-                # test error: 1. go to modfiy dockerfile.
-                #             2. or go to collect more information
-
-                # scheduler
-                guidance_for_context_retrieval_agent = analysis.get("guidance_for_context_retrieval_agent", None)
-                if guidance_for_context_retrieval_agent:
-                    if self.disable_run_test ==False:
-                        prefix_prompt = "After setting up dockerfile and running tests, the test log analysis agent find that there is other context information need to collect. Here is his analysis:\n"
+                    if self.disable_run_test:
+                        # No Docker = no F2P data, accept LLM judgment
+                        self.workflow_finish_status = True
+                        break
+                    elif f2p == "FAIL2PASS":
+                        self.workflow_finish_status = True
+                        break
                     else:
-                        prefix_prompt = "After analysis, you need collect more information. Here is the analysis:\n"
-                    self.set_agent_status("context_retrieval_agent",False)
-                    self.agents_dict['context_retrieval_agent'].add_user_message(f'{prefix_prompt}{guidance_for_context_retrieval_agent}\n\n')
+                        # Override: LLM says finish but F2P disagrees
+                        logger.info(f"F2P safety gate: LLM said is_finish=True but F2P={f2p}. Overriding.")
+                        is_finish = False
+                        if f2p == "PASS2PASS":
+                            # Tests too weak — route to write_test_agent
+                            if self.needs_test_generation and "write_test_agent" in self.agents_dict:
+                                self.set_agent_status("write_test_agent", False)
+                                self.set_agent_status("write_eval_script_agent", False)
+                                self.agents_dict['write_test_agent'].add_user_message(
+                                    "F2P validation shows PASS2PASS: tests pass even without the gold patch. "
+                                    "The tests do not capture the bug. Please strengthen the tests so they "
+                                    "fail on the unfixed code.\n\n")
+                        elif f2p == "FAIL2FAIL":
+                            # Environment issue — route to dockerfile + eval script agents
+                            self.set_agent_status("write_docker_agent", False)
+                            self.set_agent_status("write_eval_script_agent", False)
+                            self.agents_dict['write_docker_agent'].add_user_message(
+                                "F2P validation shows FAIL2FAIL: tests fail both with and without the gold patch. "
+                                "There is likely an environment or test setup issue. Please review and fix.\n\n")
+                            self.agents_dict['write_eval_script_agent'].add_user_message(
+                                "F2P validation shows FAIL2FAIL: tests fail both with and without the gold patch. "
+                                "There is likely an environment or test setup issue. Please review and fix.\n\n")
+                        elif f2p == "PASS2FAIL":
+                            # Tests broken/inverted — route to write_test_agent
+                            if self.needs_test_generation and "write_test_agent" in self.agents_dict:
+                                self.set_agent_status("write_test_agent", False)
+                                self.set_agent_status("write_eval_script_agent", False)
+                                self.agents_dict['write_test_agent'].add_user_message(
+                                    "F2P validation shows PASS2FAIL: tests pass without the gold patch but fail with it. "
+                                    "The tests are broken or inverted. Please fix the test logic.\n\n")
 
-                guidance_for_write_dockerfile_agent = analysis.get("guidance_for_write_dockerfile_agent", None)
-                if guidance_for_write_dockerfile_agent:
-                    if self.disable_run_test ==False:
-                        prefix_prompt = 'After setting up dockerfile and running tests, the test log analysis agent find that there is a problem with dockefile. Here is his analysis:\n'
-                    else:
-                        prefix_prompt = "After analysis, you need modify the dockerfile. Here is the analysis:\n"
-                    self.set_agent_status("write_docker_agent",False)
-                    self.agents_dict['write_docker_agent'].add_user_message(f'{prefix_prompt}{guidance_for_write_dockerfile_agent}\n\n')
+                if not is_finish:
+                    # Soft fallback: if disable_run_test and we've done at least one full
+                    # round of analysis+feedback, accept existing artifacts rather than
+                    # looping endlessly with speculative LLM requests.
+                    if self.disable_run_test and iteration_num >= 1:
+                        _df = self.agents_dict['write_docker_agent'].get_latest_dockerfile()
+                        _es = self.agents_dict['write_eval_script_agent'].get_latest_eval_script()
+                        if _df and _es:
+                            logger.info(
+                                "disable_run_test soft fallback: iteration_num={}, "
+                                "artifacts exist — accepting completion.".format(iteration_num)
+                            )
+                            self.workflow_finish_status = True
+                            break
 
-                guidance_for_write_eval_script_agent = analysis.get("guidance_for_write_eval_script_agent", None)
-                if guidance_for_write_eval_script_agent:
-                    if self.disable_run_test ==False:
-                        prefix_prompt = 'After setting up dockerfile and running tests, the test log analysis agent find that there is a problem with eval script. Here is his analysis:\n'
-                    else:
-                        prefix_prompt = "After analysis, you need modify the eval script. Here is the analysis:\n"
-                    self.set_agent_status("write_eval_script_agent",False)
-                    self.agents_dict['write_eval_script_agent'].add_user_message(f'{prefix_prompt}{guidance_for_write_eval_script_agent}\n\n')
+                    # scheduler
+                    guidance_for_context_retrieval_agent = analysis.get("guidance_for_context_retrieval_agent", None)
+                    if guidance_for_context_retrieval_agent:
+                        if self.disable_run_test ==False:
+                            prefix_prompt = "After setting up dockerfile and running tests, the test log analysis agent find that there is other context information need to collect. Here is his analysis:\n"
+                        else:
+                            prefix_prompt = "After analysis, you need collect more information. Here is the analysis:\n"
+                        self.set_agent_status("context_retrieval_agent",False)
+                        self.agents_dict['context_retrieval_agent'].add_user_message(f'{prefix_prompt}{guidance_for_context_retrieval_agent}\n\n')
 
-                if self.needs_test_generation:
+                    guidance_for_write_dockerfile_agent = analysis.get("guidance_for_write_dockerfile_agent", None)
+                    if guidance_for_write_dockerfile_agent:
+                        if self.disable_run_test ==False:
+                            prefix_prompt = 'After setting up dockerfile and running tests, the test log analysis agent find that there is a problem with dockefile. Here is his analysis:\n'
+                        else:
+                            prefix_prompt = "After analysis, you need modify the dockerfile. Here is the analysis:\n"
+                        self.set_agent_status("write_docker_agent",False)
+                        self.agents_dict['write_docker_agent'].add_user_message(f'{prefix_prompt}{guidance_for_write_dockerfile_agent}\n\n')
+
+                    guidance_for_write_eval_script_agent = analysis.get("guidance_for_write_eval_script_agent", None)
+                    if guidance_for_write_eval_script_agent:
+                        if self.disable_run_test ==False:
+                            prefix_prompt = 'After setting up dockerfile and running tests, the test log analysis agent find that there is a problem with eval script. Here is his analysis:\n'
+                        else:
+                            prefix_prompt = "After analysis, you need modify the eval script. Here is the analysis:\n"
+                        self.set_agent_status("write_eval_script_agent",False)
+                        self.agents_dict['write_eval_script_agent'].add_user_message(f'{prefix_prompt}{guidance_for_write_eval_script_agent}\n\n')
+
                     guidance_for_write_test_agent = analysis.get("guidance_for_write_test_agent", None)
-                    if guidance_for_write_test_agent:
+                    if guidance_for_write_test_agent and self.needs_test_generation and "write_test_agent" in self.agents_dict:
                         prefix_prompt = "After analysis, the generated tests need improvement. Here is the feedback:\n"
                         self.set_agent_status("write_test_agent", False)
                         self.set_agent_status("write_eval_script_agent", False)
@@ -336,8 +385,12 @@ class AgentsManager:
                 eval_script_f.write(eval_script_content)
 
 
+        f2p_result = getattr(self.agents_dict.get('test_analysis_agent'), 'f2p_classification', None)
+        status_data = {"is_finish": self.workflow_finish_status}
+        if f2p_result:
+            status_data["f2p_classification"] = f2p_result
         with open(os.path.join(self.output_dir, "status.json"), "w") as status_file_f:
-                json.dump({"is_finish": self.workflow_finish_status}, status_file_f)
+                json.dump(status_data, status_file_f)
 
         if self.workflow_finish_status:
             recs = self._read_results()

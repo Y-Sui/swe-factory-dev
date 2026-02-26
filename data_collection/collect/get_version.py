@@ -151,6 +151,11 @@ def main():
     parser.add_argument("--testbed", type=str, required=True, help="Temp working directory for cloning repos")
     parser.add_argument("--max-workers", type=int, default=10, help="Number of processes (default: 4)")
     parser.add_argument("--token", type=str, default=None, help="GitHub token for cloning private repos")
+    parser.add_argument(
+        "--in-place",
+        action="store_true",
+        help="Overwrite the input instance file with versioned records.",
+    )
     args = parser.parse_args()
 
     token = args.token or os.environ.get("GITHUB_TOKEN")
@@ -172,7 +177,7 @@ def main():
 
     results, failures = process_repos(tasks, args.testbed, repo_cache, args.max_workers)
 
-    output_path = generate_output_path(args.instance_path, "_versions")
+    output_path = args.instance_path if args.in_place else generate_output_path(args.instance_path, "_versions")
     save_results(results, output_path)
     print(f"\n✅ {len(results)} results saved to {output_path}")
 
