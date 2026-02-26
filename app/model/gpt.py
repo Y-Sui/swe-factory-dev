@@ -515,3 +515,42 @@ class Claude3_7Sonnet(OpenaiModel):
         return super().call(
             messages, top_p, tools, response_format, temperature, **kwargs
         )
+
+
+class Claude4_5Sonnet(OpenaiModel):
+    def __init__(self):
+        super().__init__(
+            "anthropic/claude-sonnet-4.5",
+            8192,
+            0.000003,
+            0.000015,
+            parallel_tool_call=True,
+        )
+        self.note = "Claude Sonnet 4.5 via OpenRouter"
+
+    @retry(wait=wait_random_exponential(min=30, max=600), stop=stop_after_attempt(3))
+    def call(
+        self,
+        messages: list[dict],
+        top_p: float = 1,
+        tools: list[dict] | None = None,
+        response_format: Literal["text", "json_object"] = "text",
+        temperature: float | None = None,
+        **kwargs,
+    ) -> tuple[
+        str,
+        list[ChatCompletionMessageToolCall] | None,
+        list[FunctionCallIntent],
+        float,
+        int,
+        int,
+    ]:
+        if response_format == "json_object":
+            last_content = messages[-1]["content"]
+            last_content += "\nYour response MUST start with { and end with }. DO NOT write anything else other than the json. Ignore writing triple-backticks. DO NOT start with ```json. Your response MUST start with { and end with }."
+            messages[-1]["content"] = last_content
+            response_format = "text"
+
+        return super().call(
+            messages, top_p, tools, response_format, temperature, **kwargs
+        )

@@ -41,6 +41,7 @@ def register_all_models() -> None:
     common.register_model(gpt.Gpt4_1_nano())
     common.register_model(gpt.Claude3_5Sonnet())
     common.register_model(gpt.Claude3_7Sonnet())
+    common.register_model(gpt.Claude4_5Sonnet())
     common.register_model(claude.Claude3Opus())
     common.register_model(claude.Claude3Sonnet())
     common.register_model(claude.Claude3Haiku())
