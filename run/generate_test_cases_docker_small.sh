@@ -19,13 +19,14 @@ SETUP_DIR="testbed"
 MODEL="google/gemini-2.5-flash"
 ROUND=3
 NUM_PROCS=5
-MAX_INSTANCES=2
+MAX_INSTANCES=1
 
 REPOS=(
   "MiroMindAI__MiroThinker"
   "MiroMindAI__miroflow"
 )
 
+# Step 1: Add version info to instances (required by Stage II)
 for REPO in "${REPOS[@]}"; do
   INSTANCE_FILE="$DATA_DIR/$REPO/instances.jsonl.all"
 
@@ -58,8 +59,11 @@ PY
     --testbed "$SETUP_DIR" \
     --max-workers 10 \
     --in-place
+done
 
-  TASKS_MAP="$INSTANCE_FILE"
+# Step 2: Run the multi-agent env setup (Dockerfile + eval.sh generation)
+for REPO in "${REPOS[@]}"; do
+  TASKS_MAP="$DATA_DIR/$REPO/instances.jsonl.all"
   OUT_DIR="$DATA_DIR/$REPO/setup_output_small"
   RESULT_DIR="$OUT_DIR/results"
   TASK_LIST="$OUT_DIR/task_list_small.txt"
@@ -103,3 +107,5 @@ PY
     --results-path "$RESULT_DIR" \
     --disable-run-test
 done
+
+echo "=== Done ==="
