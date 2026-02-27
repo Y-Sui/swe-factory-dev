@@ -26,13 +26,16 @@ REPOS=(
   "MiroMindAI__miroflow"
 )
 
-# Step 1: Add version info to instances (required by Stage II)
+# Step 1: Add version info to instances (modifies file in-place)
 for REPO in "${REPOS[@]}"; do
-  INSTANCE_FILE="$DATA_DIR/$REPO/instances.jsonl.all"
+  INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
+  if [ -z "$INSTANCE_FILE" ]; then
+    echo "=== No instances_selected file found for $REPO, skipping ==="
+    continue
+  fi
 
   if python3 - "$INSTANCE_FILE" <<'PY'
-import json
-import sys
+import json, sys
 path = sys.argv[1]
 try:
     with open(path, "r", encoding="utf-8") as f:
@@ -63,7 +66,11 @@ done
 
 # Step 2: Run the multi-agent env setup (Dockerfile + eval.sh generation)
 for REPO in "${REPOS[@]}"; do
-  TASKS_MAP="$DATA_DIR/$REPO/instances.jsonl.all"
+  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
+  if [ -z "$TASKS_MAP" ]; then
+    echo "=== No instances_selected file found for $REPO, skipping ==="
+    continue
+  fi
   OUT_DIR="$DATA_DIR/$REPO/setup_output_small"
   RESULT_DIR="$OUT_DIR/results"
   TASK_LIST="$OUT_DIR/task_list_small.txt"

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import glob as glob_mod
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def create_instance(repo: Repo, pull: dict, output_path: str, mode: str ='swebench') -> dict:
+def create_instance(repo: Repo, pull: dict, output_dir: str, mode: str ='swebench') -> dict:
     """
     Create a single task instance from a pull request, where task instance is:
 
@@ -33,14 +34,9 @@ def create_instance(repo: Repo, pull: dict, output_path: str, mode: str ='sweben
         test_patch (str): test suite as .patch (apply to base commit),
     }
     """
-    # try: 
     patch, test_patch, request_success = extract_patches(pull, repo)
-    # except Exception as e:
-    #     logger.info(e)
-    #     patch = ""
-    #     test_patch = ""
     instance_id  = (repo.repo.full_name + "-" + str(pull["number"])).replace("/", "__")
-    successful_path = os.path.join(os.path.dirname(output_path), "successful_requests.txt")
+    successful_path = os.path.join(output_dir, "successful_requests.txt")
     if request_success:
         with open(successful_path, "a") as f:
             f.write(instance_id + "\n")
@@ -132,126 +128,168 @@ def has_test_patch(instance: dict) -> bool:
         return False
     return True
 
-def main(pr_file: str, output: str, token: Optional[str] = None,mode: Optional[str] = 'swebench',language: Optional[str] = 'python', cutoff_date: Optional[str] = None):
-    """
-    Main thread for creating task instances from pull requests
 
-    Args:
-        pr_file (str): path to pull request JSONL file
-        output (str): output file name
-        token (str): GitHub token
+def is_readme_only_patch(patch: str) -> bool:
+    """Return True if every changed file in the patch is a README."""
+    if not patch or not patch.strip():
+        return False
+    found_diff = False
+    for line in patch.split("\n"):
+        if line.startswith("diff --git a/"):
+            found_diff = True
+            parts = line.split(" b/")
+            if len(parts) >= 2:
+                filepath = parts[-1].strip()
+                basename = os.path.basename(filepath).lower()
+                if not basename.startswith("readme"):
+                    return False
+    return found_diff
+
+
+def is_trivial_patch(patch: str, threshold: int = 2) -> bool:
+    """Return True if the total changed lines (added + removed) is <= threshold."""
+    if not patch or not patch.strip():
+        return True
+    changed = 0
+    for line in patch.split("\n"):
+        if (line.startswith("+") and not line.startswith("+++")) or \
+           (line.startswith("-") and not line.startswith("---")):
+            changed += 1
+    return changed <= threshold
+
+
+def main(pr_file: str, output_dir: str, token: Optional[str] = None, mode: Optional[str] = 'swebench', language: Optional[str] = 'python', cutoff_date: Optional[str] = None):
+    """
+    Create task instances from pull requests.
+
+    Outputs (written to output_dir):
+        instances_all_{N}.jsonl       — all valid instances (N = count)
+        instances_ori_test_{N}.jsonl  — instances with original test patches
+
+    Filters applied:
+        - Skip PRs that only modify README files
+        - Skip PRs with trivial code changes (<=2 lines)
     """
     logger.info(f'Language: {language}')
     logger.info(f'mode: {mode}')
-    cutoff_date = datetime.strptime(cutoff_date, "%Y-%m-%dT%H:%M:%SZ")
+    cutoff_dt = datetime.strptime(cutoff_date, "%Y-%m-%dT%H:%M:%SZ")
     if token is None:
-        # Get GitHub token from environment variable if not provided
         token = os.environ["GITHUB_TOKEN"]
 
-    def load_repo(repo_name,language):
-        # Return repo object for a given repo name
+    def load_repo(repo_name, language):
         owner, repo = repo_name.split("/")
-        return Repo(owner, repo, token=token,language=language)
+        return Repo(owner, repo, token=token, language=language)
 
-    repos = dict()
-    completed = 0
-    with_tests = 0
-    total_instances = 0
-    all_output = output + ".all"
-    seen_prs = set()
+    os.makedirs(output_dir, exist_ok=True)
 
-    successful_path = os.path.join(os.path.dirname(output), "successful_requests.txt")
-
+    # Load successful requests for resume
+    successful_path = os.path.join(output_dir, "successful_requests.txt")
     if not os.path.exists(successful_path):
         with open(successful_path, "w") as f:
-            pass  
-
+            pass
     successful_instances = set()
     with open(successful_path, "r") as f:
         for line in f:
             successful_instances.add(line.strip())
 
-    # Continue where we left off if output file already exists
-    if os.path.exists(all_output):
-        with open(all_output) as f:
+    # Resume: load existing instances from instances_all_*.jsonl
+    raw_instances = []
+    seen_prs = set()
+    for fpath in sorted(glob_mod.glob(os.path.join(output_dir, "instances_all_*.jsonl"))):
+        with open(fpath, "r", encoding="utf-8") as f:
             for line in f:
-                pr = json.loads(line)
-                if "instance_id" not in pr:
-                    pr["instance_id"] = (
-                        pr["repo"] + "-" + str(pr["pull_number"])
-                    ).replace("/", "__")
-                instance_id = pr["instance_id"]
-                seen_prs.add(instance_id)
-                if datetime.strptime(pr["created_at"], "%Y-%m-%dT%H:%M:%SZ") >= cutoff_date:
-                    logger.info(f"Instance {instance_id} created_at {pr['created_at']} exceeds cutoff_date {cutoff_date}")
+                line = line.strip()
+                if not line:
                     continue
-                if is_valid_instance(pr):
-                    completed += 1
-                    if has_test_patch(pr):
-                        with_tests += 1
-    logger.info(f"{len(seen_prs)} instance_ids previously recorded")
-    original_output_path = output
-    # Write to .all file for all PRs
-    write_mode_all = "w" if not os.path.exists(all_output) else "a"
-    with open(all_output, write_mode_all) as all_output:
-        # Write to output file for PRs with test suites
-        write_mode = "w" if not os.path.exists(output) else "a"
-        with open(output, write_mode) as output:
-            for ix, line in enumerate(open(pr_file)):
-                total_instances += 1
-                pull = json.loads(line)
-                if ix % 100 == 0:
-                    logger.info(
-                        f"[{pull['base']['repo']['full_name']}] ( Up to {ix} checked ) {completed} valid, {with_tests} with tests."
-                    )
-                # Construct instance fields
-                instance_id = (
-                    pull["base"]["repo"]["full_name"] + "-" + str(pull["number"])
-                )
-                instance_id = instance_id.replace("/", "__")
-                
-                if instance_id in seen_prs:
-                    seen_prs -= {instance_id}
+                inst = json.loads(line)
+                if "instance_id" not in inst:
+                    inst["instance_id"] = (inst["repo"] + "-" + str(inst["pull_number"])).replace("/", "__")
+                if datetime.strptime(inst["created_at"], "%Y-%m-%dT%H:%M:%SZ") >= cutoff_dt:
                     continue
+                raw_instances.append(inst)
+                seen_prs.add(inst["instance_id"])
+    logger.info(f"{len(seen_prs)} instance_ids loaded from checkpoint")
 
-                if instance_id in successful_instances:
-                    continue
-    
-                if not is_valid_pull(pull):
-                    # Throw out invalid PRs
-                    continue
-                # Create task instance
-                repo_name = pull["base"]["repo"]["full_name"]
-                if repo_name not in repos:
-                    repos[repo_name] = load_repo(repo_name,language)
-                repo = repos[repo_name]
-                instance = create_instance(repo, pull,original_output_path,mode)
-                if is_valid_instance(instance):
-                    # If valid, write to .all output file
-                    print(
-                        json.dumps(instance), end="\n", flush=True, file=all_output
-                    )  # write all instances to a separate file
-                    completed += 1
-                    if has_test_patch(instance):
-                        # If has test suite, write to output file
-                        print(json.dumps(instance), end="\n", flush=True, file=output)
-                        with_tests += 1
-    logger.info(
-        f"Total instances: {total_instances}, completed: {completed}, with tests: {with_tests}"
-    )
-    logger.info(f"Didn't see {len(seen_prs)} instances previously recorded")
-    logger.info("\n".join(sorted(seen_prs)))
+    # Process new PRs
+    repos = dict()
+    total_prs = 0
+    new_count = 0
+
+    for ix, line in enumerate(open(pr_file)):
+        total_prs += 1
+        pull = json.loads(line)
+        if ix % 100 == 0:
+            logger.info(
+                f"[{pull['base']['repo']['full_name']}] Checked {ix} PRs, {len(raw_instances)} valid so far"
+            )
+        instance_id = (pull["base"]["repo"]["full_name"] + "-" + str(pull["number"])).replace("/", "__")
+
+        if instance_id in seen_prs or instance_id in successful_instances:
+            continue
+        if not is_valid_pull(pull):
+            continue
+
+        repo_name = pull["base"]["repo"]["full_name"]
+        if repo_name not in repos:
+            repos[repo_name] = load_repo(repo_name, language)
+        repo = repos[repo_name]
+
+        instance = create_instance(repo, pull, output_dir, mode)
+
+        if datetime.strptime(instance["created_at"], "%Y-%m-%dT%H:%M:%SZ") >= cutoff_dt:
+            continue
+        if is_valid_instance(instance):
+            raw_instances.append(instance)
+            new_count += 1
+
+    # Apply filters to ALL instances (including resumed ones, so new filters take effect)
+    all_instances = []
+    filtered_readme = 0
+    filtered_trivial = 0
+    for inst in raw_instances:
+        if is_readme_only_patch(inst.get("patch", "")):
+            logger.info(f"Filtering {inst['instance_id']}: README-only changes")
+            filtered_readme += 1
+            continue
+        if is_trivial_patch(inst.get("patch", "")):
+            logger.info(f"Filtering {inst['instance_id']}: trivial changes (<=2 lines)")
+            filtered_trivial += 1
+            continue
+        all_instances.append(inst)
+
+    test_instances = [i for i in all_instances if has_test_patch(i)]
+
+    # Clean up old output files
+    for pattern in ["instances_all_*.jsonl", "instances_ori_test_*.jsonl"]:
+        for f in glob_mod.glob(os.path.join(output_dir, pattern)):
+            os.remove(f)
+
+    # Write new output files with count in filename
+    all_path = os.path.join(output_dir, f"instances_all_{len(all_instances)}.jsonl")
+    test_path = os.path.join(output_dir, f"instances_ori_test_{len(test_instances)}.jsonl")
+
+    with open(all_path, "w", encoding="utf-8") as f:
+        for inst in all_instances:
+            f.write(json.dumps(inst) + "\n")
+
+    with open(test_path, "w", encoding="utf-8") as f:
+        for inst in test_instances:
+            f.write(json.dumps(inst) + "\n")
+
+    logger.info(f"Total PRs scanned: {total_prs}, new instances: {new_count}")
+    logger.info(f"Filtered (README-only): {filtered_readme}, filtered (trivial): {filtered_trivial}")
+    logger.info(f"All valid instances: {len(all_instances)} -> {all_path}")
+    logger.info(f"Instances with tests: {len(test_instances)} -> {test_path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("pr_file", type=str, help="Path to pull request JSONL file")
-    parser.add_argument("output", type=str, help="Output file name")
+    parser.add_argument("output_dir", type=str, help="Output directory for instance files")
     parser.add_argument("--token", type=str, help="GitHub token")
-    parser.add_argument("--mode", type=str, default='omnigirl',help="collecting mode")
+    parser.add_argument("--mode", type=str, default='omnigirl', help="collecting mode")
     parser.add_argument("--cutoff_date", type=str, default="2025-03-31T23:59:59Z", help="Cutoff date for filtering PRs in YYYY-MM-DDTHH:MM:SSZ format")
     parser.add_argument("--language", type=str, help="language")
-    
+
     args = parser.parse_args()
-    print(">>> reached main()")
     main(**vars(args))
