@@ -379,6 +379,11 @@ def is_valid_response(data: Any,disable_context_retrieval:bool,enable_web_search
 
         if not isinstance(terminate, bool):
             return False, "'is_finish' parameter must be a boolean (true/false)"
+
+    # When is_finish is true, guidance fields are not needed — skip validation.
+    if data.get("is_finish") is True:
+        return True, "OK"
+
     if disable_context_retrieval:
         key_list = ['guidance_for_write_dockerfile_agent',
             'guidance_for_write_eval_script_agent',
@@ -399,7 +404,7 @@ def is_valid_response(data: Any,disable_context_retrieval:bool,enable_web_search
             if not isinstance(terminate, str):
                 return False, "'{key}' parameter must be a string"
 
-        
+
     return True, "OK"
 
 

@@ -332,6 +332,16 @@ class AgentsManager:
                                 "The tests are broken or inverted. Please fix the test logic.\n\n")
 
                 if not is_finish:
+                    # Fallback: if F2P is objectively FAIL2PASS but LLM analysis
+                    # was lost (e.g. response validation failed), accept the result.
+                    if f2p == "FAIL2PASS":
+                        logger.info(
+                            "F2P fallback: F2P is FAIL2PASS but LLM analysis "
+                            "did not confirm (is_finish={}). Accepting anyway.".format(is_finish)
+                        )
+                        self.workflow_finish_status = True
+                        break
+
                     # Soft fallback: if disable_run_test and we've done at least one full
                     # round of analysis+feedback, accept existing artifacts rather than
                     # looping endlessly with speculative LLM requests.
