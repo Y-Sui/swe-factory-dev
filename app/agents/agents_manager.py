@@ -271,7 +271,7 @@ class AgentsManager:
                         analysis = json.loads(analysis)
                     except:
                         analysis = {}
-                else:
+                elif not isinstance(analysis, dict):
                     analysis = {}
 
 
