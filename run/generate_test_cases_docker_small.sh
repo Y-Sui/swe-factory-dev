@@ -29,7 +29,7 @@ REPOS=(
 for REPO in "${REPOS[@]}"; do
   INSTANCE_FILE="$DATA_DIR/$REPO/instances.jsonl.all"
 
-  if python - "$INSTANCE_FILE" <<'PY'
+  if python3 - "$INSTANCE_FILE" <<'PY'
 import json
 import sys
 path = sys.argv[1]
@@ -53,7 +53,7 @@ PY
   fi
 
   echo "=== Getting versions for $REPO ==="
-  python "$SCRIPT_DIR/get_version.py" \
+  python3 "$SCRIPT_DIR/get_version.py" \
     --instance_path "$INSTANCE_FILE" \
     --testbed "$SETUP_DIR" \
     --max-workers 10 \
@@ -66,7 +66,7 @@ PY
   mkdir -p "$OUT_DIR" "$RESULT_DIR"
 
   export TASKS_MAP TASK_LIST MAX_INSTANCES
-  python - <<'PY'
+  python3 - <<'PY'
 import json
 import os
 
@@ -91,7 +91,7 @@ with open(task_list, "w", encoding="utf-8") as f:
 PY
 
   echo "=== Running Stage II for $REPO with $MODEL (small test) ==="
-  python app/main.py swe-bench \
+  python3 app/main.py swe-bench \
     --model "$MODEL" \
     --tasks-map "$TASKS_MAP" \
     --task-list-file "$TASK_LIST" \
