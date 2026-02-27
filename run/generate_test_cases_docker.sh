@@ -18,6 +18,8 @@ export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
 SCRIPT_DIR="data_collection/collect"
 DATA_DIR="../internal-swe-bench-data"
+# DATA_DIR="/mnt/oss-code-track/yuansui/internal-swe-bench-data"
+
 SETUP_DIR="testbed"
 # MODEL="anthropic/claude-sonnet-4.5"
 MODEL="google/gemini-2.5-flash"
@@ -33,7 +35,7 @@ REPOS=(
 for REPO in "${REPOS[@]}"; do
   INSTANCE_FILE="$DATA_DIR/$REPO/instances.jsonl.all"
 
-  if python - "$INSTANCE_FILE" <<'PY'
+  if python3 - "$INSTANCE_FILE" <<'PY'
 import json
 import sys
 path = sys.argv[1]
@@ -57,7 +59,7 @@ PY
   fi
 
   echo "=== Getting versions for $REPO ==="
-  python "$SCRIPT_DIR/get_version.py" \
+  python3 "$SCRIPT_DIR/get_version.py" \
     --instance_path "$INSTANCE_FILE" \
     --testbed "$SETUP_DIR" \
     --max-workers 10 \
@@ -72,7 +74,7 @@ for REPO in "${REPOS[@]}"; do
   mkdir -p "$OUT_DIR" "$RESULT_DIR"
 
   echo "=== Running Stage II for $REPO with $MODEL ==="
-  python app/main.py swe-bench \
+  python3 app/main.py swe-bench \
     --model "$MODEL" \
     --tasks-map "$TASKS_MAP" \
     --num-processes "$NUM_PROCS" \
@@ -80,8 +82,7 @@ for REPO in "${REPOS[@]}"; do
     --conv-round-limit "$ROUND" \
     --output-dir "$OUT_DIR" \
     --setup-dir "$SETUP_DIR" \
-    --results-path "$RESULT_DIR" \
-    --disable-run-test
+    --results-path "$RESULT_DIR" 
 done
 
 echo "=== Done ==="

@@ -78,6 +78,8 @@ The script must execute the provided test files inside the specified Docker envi
 
 6. You MUST capture the exit code immediately after running the tests using ``rc=$? '', and then echo: ``OMNIGRIL_EXIT_CODE=$rc''. This ensures the judge can determine whether the tests passed successfully.
 
+7. The script MUST execute actual test commands (e.g., `pytest`, `python -m pytest`, `unittest`). NEVER output placeholder messages like "No tests to run" or "No specific test files provided" — always attempt to run the target test files. If unsure about the exact test command, default to `python -m pytest <test_files> -xvs`.
+
 Eval script skeleton:
 {eval_script_skeleton}
 
@@ -90,7 +92,7 @@ set -uxo pipefail
 source /opt/miniconda3/bin/activate
 conda activate testbed
 cd /testbed
-pip install -r test-requirements.txt && pip install -e . 
+pip install -r test-requirements.txt && pip install -e .
 
 git checkout 6de254ef00f99ce5284ab947f2dd1179db6d28f6 "test-data/unit/check-functions.test" "test-data/unit/check-redefine.test"
 
@@ -101,7 +103,7 @@ EOF_114329324912
 
 # Required: run target tests files instead of all tests!
 pytest --no-header -rA --tb=no -p no:cacheprovider -n4 mypy/test/testcheck.py::TypeCheckSuite::check-functions.test mypy/test/testcheck.py::TypeCheckSuite::check-redefine.test
-rc=$?            #Required, save exit code\n 
+rc=$?            #Required, save exit code\n
 echo "OMNIGRIL_EXIT_CODE=$rc" #Required, echo test status
 git checkout 6de254ef00f99ce5284ab947f2dd1179db6d28f6 "test-data/unit/check-functions.test" "test-data/unit/check-redefine.test"
 </script>
@@ -144,7 +146,9 @@ The script must execute the provided test files inside the specified Docker envi
 
 6. You MUST capture the exit code immediately after running the tests using ``rc=$? '', and then echo: ``OMNIGRIL_EXIT_CODE=$rc''. This ensures the judge can determine whether the tests passed successfully.
 
-7. Test resources to download/remove:
+7. The script MUST execute actual test commands (e.g., `pytest`, `python -m pytest`, `unittest`). NEVER output placeholder messages like "No tests to run" or "No specific test files provided" — always attempt to run the target test files. If unsure about the exact test command, default to `python -m pytest <test_files> -xvs`.
+
+8. Test resources to download/remove:
     - For each resource that needs to be added, use wget  with the -O <path> (or --output-document=<path>) flag to download it directly into its target location, overwriting any existing file at that path.
     - For each resource that needs to be removed, issue a rm -f <path> command to delete it from the working tree.
     - Integrate these download/remove commands into your Eval script skeleton (immediately after resetting the tests), and adjust the placement or ordering in the skeleton if necessary to ensure the repo ends up in the correct state before and after applying the test patch

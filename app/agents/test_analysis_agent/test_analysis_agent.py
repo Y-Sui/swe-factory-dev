@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+
 from loguru import logger
 from app.agents.agent import Agent
 from app.data_structures import FunctionCallIntent, MessageThread
@@ -376,6 +377,14 @@ class TestAnalysisAgent(Agent):
                 build_image_logger.error(f"Failed to delete previous image {prev_image_name}: {str(e)}")
         
         
+
+        # Inject GITHUB_TOKEN into git clone URLs for private repo access
+        token = os.environ.get("GITHUB_TOKEN", "")
+        if token:
+            dockerfile = dockerfile.replace(
+                f"https://github.com/{self.task.repo_name}",
+                f"https://x-access-token:{token}@github.com/{self.task.repo_name}",
+            )
 
         dockerfile_path = f'{cur_build_image_dir}/Dockerfile'
         with open(dockerfile_path, "w") as f:

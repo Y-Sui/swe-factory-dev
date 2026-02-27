@@ -14,22 +14,30 @@ export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
 SCRIPT_DIR="data_collection/collect"
 DATA_DIR="../internal-swe-bench-data"
+# DATA_DIR="/mnt/oss-code-track/yuansui/internal-swe-bench-data"
+
 SETUP_DIR="testbed"
 # MODEL="anthropic/claude-sonnet-4.5"
 MODEL="google/gemini-2.5-flash"
 ROUND=3
 NUM_PROCS=5
-MAX_INSTANCES=2
+MAX_INSTANCES=1
 
 REPOS=(
   "MiroMindAI__MiroThinker"
-  "MiroMindAI__miroflow"
+  # "MiroMindAI__miroflow"
+  # "MiroMindAI__sd-torchtune"
 )
 
+# Step 1: Add version info to instances (required by Stage II)
 for REPO in "${REPOS[@]}"; do
-  INSTANCE_FILE="$DATA_DIR/$REPO/instances.jsonl.all"
+  INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
+  if [[ -z "$INSTANCE_FILE" ]]; then
+    echo "=== No instances_selected_*.jsonl found for $REPO, skipping ==="
+    continue
+  fi
 
-  if python - "$INSTANCE_FILE" <<'PY'
+  if python3 - "$INSTANCE_FILE" <<'PY'
 import json
 import sys
 path = sys.argv[1]
@@ -53,11 +61,19 @@ PY
   fi
 
   echo "=== Getting versions for $REPO ==="
-  python "$SCRIPT_DIR/get_version.py" \
+  python3 "$SCRIPT_DIR/get_version.py" \
     --instance_path "$INSTANCE_FILE" \
     --testbed "$SETUP_DIR" \
     --max-workers 10 \
     --in-place
+done
+
+# Step 2: Run the multi-agent env setup (Dockerfile + eval.sh generation)
+for REPO in "${REPOS[@]}"; do
+  INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
+  if [[ -z "$INSTANCE_FILE" ]]; then
+    continue
+  fi
 
   TASKS_MAP="$INSTANCE_FILE"
   OUT_DIR="$DATA_DIR/$REPO/setup_output_small"
@@ -66,7 +82,7 @@ PY
   mkdir -p "$OUT_DIR" "$RESULT_DIR"
 
   export TASKS_MAP TASK_LIST MAX_INSTANCES
-  python - <<'PY'
+  python3 - <<'PY'
 import json
 import os
 
@@ -91,7 +107,7 @@ with open(task_list, "w", encoding="utf-8") as f:
 PY
 
   echo "=== Running Stage II for $REPO with $MODEL (small test) ==="
-  python app/main.py swe-bench \
+  python3 app/main.py swe-bench \
     --model "$MODEL" \
     --tasks-map "$TASKS_MAP" \
     --task-list-file "$TASK_LIST" \
@@ -100,6 +116,7 @@ PY
     --conv-round-limit "$ROUND" \
     --output-dir "$OUT_DIR" \
     --setup-dir "$SETUP_DIR" \
-    --results-path "$RESULT_DIR" \
-    --disable-run-test
+    --results-path "$RESULT_DIR"
 done
+
+echo "=== Done ==="

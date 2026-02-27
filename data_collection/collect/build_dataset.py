@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import glob
 import json
 import logging
 import os
@@ -100,6 +101,30 @@ def is_valid_pull(pull: dict) -> bool:
     return False
 
 
+_CONFIG_EXTENSIONS = {
+    ".yml", ".yaml", ".json", ".toml", ".ini", ".cfg", ".conf",
+    ".md", ".rst", ".lock", ".txt",
+}
+_CONFIG_NAMES = {
+    "makefile", "dockerfile", ".gitignore", ".dockerignore", ".env",
+    "setup.py", "setup.cfg", "pyproject.toml", "tox.ini", "manifest.in",
+    ".flake8", ".pylintrc",
+}
+MIN_CHANGED_LINES = 3
+
+
+def _is_config_or_doc(filepath: str) -> bool:
+    name = os.path.basename(filepath).lower()
+    _, ext = os.path.splitext(name)
+    if name.startswith("readme"):
+        return True
+    if name in _CONFIG_NAMES:
+        return True
+    if ext in _CONFIG_EXTENSIONS:
+        return True
+    return False
+
+
 def is_valid_instance(instance: dict) -> bool:
     """
     Check whether task instance has all required fields for task instance creation
@@ -109,12 +134,42 @@ def is_valid_instance(instance: dict) -> bool:
     Returns:
         bool: whether task instance is valid
     """
-    if instance["patch"] is None or instance["patch"] == "":
+    patch = instance["patch"]
+    if not patch or patch.strip() == "":
         logger.info(f"Instance {instance['pull_number']} no patch")
         return False
-    if instance["problem_statement"] is None or instance["problem_statement"] == "":
+    if not instance.get("problem_statement"):
         logger.info(f"Instance {instance['pull_number']} no problem statement")
         return False
+
+    # Parse patch: extract changed files and count changed lines
+    files = []
+    changed_lines = 0
+    for line in patch.split("\n"):
+        if line.startswith("diff --git a/"):
+            parts = line.split(" b/", 1)
+            if len(parts) == 2:
+                files.append(parts[1].strip())
+        elif line.startswith("+") and not line.startswith("+++"):
+            changed_lines += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            changed_lines += 1
+
+    # Reject README-only changes
+    if files and all(os.path.basename(f).lower().startswith("readme") for f in files):
+        logger.info(f"Instance {instance['pull_number']} README-only change")
+        return False
+
+    # Reject config/doc-only changes
+    if files and all(_is_config_or_doc(f) for f in files):
+        logger.info(f"Instance {instance['pull_number']} config/doc-only change")
+        return False
+
+    # Reject patches with too few changed lines (1-2 lines)
+    if changed_lines < MIN_CHANGED_LINES:
+        logger.info(f"Instance {instance['pull_number']} too few changes ({changed_lines} lines)")
+        return False
+
     return True
 
 
@@ -160,6 +215,17 @@ def main(pr_file: str, output: str, token: Optional[str] = None,mode: Optional[s
     all_output = output + ".all"
     seen_prs = set()
 
+    # Restore previously renamed files so resume works
+    output_dir = os.path.dirname(output) or "."
+    for pattern, restore_path in [
+        ("instances_ori_tst_*.jsonl", output),
+        ("instances_all_*.jsonl", all_output),
+    ]:
+        matches = glob.glob(os.path.join(output_dir, pattern))
+        if matches and not os.path.exists(restore_path):
+            os.rename(matches[0], restore_path)
+            logger.info(f"Restored {matches[0]} -> {restore_path}")
+
     successful_path = os.path.join(os.path.dirname(output), "successful_requests.txt")
 
     if not os.path.exists(successful_path):
@@ -191,6 +257,7 @@ def main(pr_file: str, output: str, token: Optional[str] = None,mode: Optional[s
                         with_tests += 1
     logger.info(f"{len(seen_prs)} instance_ids previously recorded")
     original_output_path = output
+    all_output_path = all_output
     # Write to .all file for all PRs
     write_mode_all = "w" if not os.path.exists(all_output) else "a"
     with open(all_output, write_mode_all) as all_output:
@@ -241,6 +308,17 @@ def main(pr_file: str, output: str, token: Optional[str] = None,mode: Optional[s
     )
     logger.info(f"Didn't see {len(seen_prs)} instances previously recorded")
     logger.info("\n".join(sorted(seen_prs)))
+
+    # Rename output files with counts
+    output_dir = os.path.dirname(original_output_path)
+    if os.path.exists(original_output_path):
+        new_name = os.path.join(output_dir, f"instances_ori_tst_{with_tests}.jsonl")
+        os.rename(original_output_path, new_name)
+        logger.info(f"Saved: {new_name}")
+    if os.path.exists(all_output_path):
+        new_name = os.path.join(output_dir, f"instances_all_{completed}.jsonl")
+        os.rename(all_output_path, new_name)
+        logger.info(f"Saved: {new_name}")
 
 
 if __name__ == "__main__":

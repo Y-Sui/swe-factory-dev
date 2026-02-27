@@ -31,6 +31,7 @@ You will receive:
 3. Include both positive tests (verifying the fix works) and negative tests (verifying the old broken behavior is gone) where appropriate.
 4. Tests should be focused, minimal, and deterministic — avoid testing unrelated functionality.
 5. Import paths and module names must match the repository structure shown in the patch.
+6. Python module/package names CANNOT contain hyphens (`-`). Directory names with hyphens (e.g., `miroflow-agent`) are not valid Python import paths. Use relative imports from within the package or adjust `sys.path`/`PYTHONPATH` and import from the correct Python package name.
 
 ### Output Format:
 Return your generated tests as a unified diff that creates new test files. Wrap the diff in `<test_patch>` tags.
@@ -129,6 +130,90 @@ def summarize_large_patch(patch: str, max_chars: int = 15000) -> str:
     return ''.join(summarized_parts)
 
 
+def repair_hunk_headers(patch: str) -> str:
+    """Fix common LLM-generated unified diff issues.
+
+    1. ``diff --git a/dev/null b/<path>`` → proper new-file header with
+       ``new file mode 100644``.
+    2. Incorrect ``@@ -A,B +C,D @@`` line counts → recounted from actual
+       ``+``/``-``/context lines.
+    3. Ensures trailing newline so ``git apply`` doesn't choke.
+    """
+    # --- Pass 1: fix new-file diff headers ---
+    raw_lines = patch.splitlines(keepends=True)
+    fixed_lines: list[str] = []
+    for line in raw_lines:
+        stripped = line.rstrip('\n\r')
+        # "diff --git a/dev/null b/<path>" → proper new-file header
+        m = re.match(r'^diff --git a/dev/null b/(.*)', stripped)
+        if m:
+            path = m.group(1)
+            fixed_lines.append(f'diff --git a/{path} b/{path}\n')
+            fixed_lines.append('new file mode 100644\n')
+        # "--- dev/null" (missing leading /) → "--- /dev/null"
+        elif stripped == '--- dev/null':
+            fixed_lines.append('--- /dev/null\n')
+        else:
+            fixed_lines.append(line)
+
+    # --- Pass 2: recount hunk line numbers ---
+    out: list[str] = []
+    hunk_start_idx: int | None = None
+    old_count = 0
+    new_count = 0
+
+    def _flush_hunk():
+        nonlocal hunk_start_idx, old_count, new_count
+        if hunk_start_idx is None:
+            return
+        header = out[hunk_start_idx]
+        m2 = re.match(r'^(@@ -(\d+),?\d* \+(\d+),?)\d*(.*)', header)
+        if m2:
+            old_start = m2.group(2)
+            new_start = m2.group(3)
+            rest = m2.group(4)  # trailing @@ and optional section heading
+            out[hunk_start_idx] = f"@@ -{old_start},{old_count} +{new_start},{new_count}{rest}"
+            if not out[hunk_start_idx].endswith('\n'):
+                out[hunk_start_idx] += '\n'
+        hunk_start_idx = None
+        old_count = 0
+        new_count = 0
+
+    for line in fixed_lines:
+        stripped = line.rstrip('\n\r')
+        if stripped.startswith('diff --git'):
+            _flush_hunk()
+            out.append(line)
+        elif stripped.startswith('---') or stripped.startswith('+++') or stripped.startswith('new file mode'):
+            _flush_hunk()
+            out.append(line)
+        elif stripped.startswith('@@'):
+            _flush_hunk()
+            hunk_start_idx = len(out)
+            out.append(line)
+            old_count = 0
+            new_count = 0
+        elif hunk_start_idx is not None:
+            if stripped.startswith('+'):
+                new_count += 1
+            elif stripped.startswith('-'):
+                old_count += 1
+            else:
+                # context line (or empty line treated as context)
+                old_count += 1
+                new_count += 1
+            out.append(line)
+        else:
+            out.append(line)
+
+    _flush_hunk()
+    result = ''.join(out)
+    # git apply requires a trailing newline
+    if result and not result.endswith('\n'):
+        result += '\n'
+    return result
+
+
 def extract_test_patch_from_response(res_text: str, output_dir: str) -> tuple[str | None, list[str]]:
     """Extract test patch from LLM response. Returns (patch_str, test_file_list)."""
     patch_content = None
@@ -165,6 +250,9 @@ def extract_test_patch_from_response(res_text: str, output_dir: str) -> tuple[st
         patch_content = patch_content[idx:]
     elif idx < 0:
         return None, []
+
+    # Fix hunk headers that LLMs often get wrong
+    patch_content = repair_hunk_headers(patch_content)
 
     # Extract test file paths from +++ b/... lines
     test_files = re.findall(r'\+\+\+ b/(.*)', patch_content)

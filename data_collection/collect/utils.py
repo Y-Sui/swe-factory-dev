@@ -654,14 +654,17 @@ def get_with_retries(
     token: str = None,
     max_retries: int = 5,
     backoff_factor: float = 0.5,
-    timeout: int = 5
+    timeout: int = 5,
+    extra_headers: dict = None,
 ) -> str:
     if token and not check_token_validity(token):
         logger.warning("Invalid GitHub token, aborting request.")
         return ""
-    
+
     session = requests.Session()
     headers = {"Authorization": f"token {token}"} if token else {}
+    if extra_headers:
+        headers.update(extra_headers)
 
     retries = Retry(
         total=max_retries,
@@ -694,8 +697,14 @@ def extract_patches(pull: dict, repo: Repo) -> tuple[str, str, bool]:
         patch_test_str (str): test patch
     """
     # Convert diff to patch format with "index" lines removed
-    # patch = requests.get(pull["diff_url"]).text
-    patch = get_with_retries(pull["diff_url"],repo.token)
+    # Use GitHub API endpoint instead of web .diff URL (works for private repos)
+    diff_url = pull["diff_url"]
+    extra_headers = None
+    m = re.match(r"https://github\.com/([^/]+/[^/]+)/pull/(\d+)\.diff", diff_url)
+    if m:
+        diff_url = f"https://api.github.com/repos/{m.group(1)}/pulls/{m.group(2)}"
+        extra_headers = {"Accept": "application/vnd.github.v3.diff"}
+    patch = get_with_retries(diff_url, repo.token, extra_headers=extra_headers)
     if patch =='':
         return "", "", False
     if patch.endswith("\n"):

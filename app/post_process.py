@@ -130,6 +130,9 @@ def organize_experiment_results(expr_dir: str):
     for task_dir in task_exp_dirs:
         extract_status, _ = read_extract_status(task_dir)
         corresponding_dir = extract_status.to_dir_name(expr_dir)
+        dest_path = pjoin(corresponding_dir, os.path.basename(task_dir))
+        if os.path.exists(dest_path):
+            shutil.rmtree(dest_path)
         shutil.move(task_dir, corresponding_dir)
 
 

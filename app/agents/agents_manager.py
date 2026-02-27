@@ -137,8 +137,14 @@ class AgentsManager:
         return old_paths + new_paths
     
     def get_repository_basic_info(self) -> str:
+        token = os.environ.get("GITHUB_TOKEN", "")
+        if token:
+            clone_url = f"https://x-access-token:{token}@github.com/{self.task.repo_name}.git"
+        else:
+            clone_url = f"https://github.com/{self.task.repo_name}.git"
         return (
             f"Target repository name: {self.task.repo_name}\n"
+            f"Clone URL (use this exact URL for git clone): {clone_url}\n"
             f"Commit SHA: {self.task.commit}\n"
             f"Version: {self.task.version}\n"
             "Target test files:\n"

@@ -41,7 +41,7 @@ for idx in $(seq 17 $BATCH_COUNT); do
 
   echo "▶️  Running batch_${idx} with normal mode"
 
-  python app/main.py swe-bench \
+  python3 app/main.py swe-bench \
     --model "$MODEL" \
     --tasks-map "$TASKS_MAP" \
     --task-list-file "$TASK_LIST_FILE" \
