@@ -80,8 +80,7 @@ for REPO in "${REPOS[@]}"; do
     --conv-round-limit "$ROUND" \
     --output-dir "$OUT_DIR" \
     --setup-dir "$SETUP_DIR" \
-    --results-path "$RESULT_DIR" \
-    --disable-run-test
+    --results-path "$RESULT_DIR"
 done
 
 echo "=== Done ==="
