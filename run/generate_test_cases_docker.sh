@@ -69,6 +69,8 @@ PY
 done
 
 # Step 2: Run the multi-agent env setup (Dockerfile + eval.sh generation)
+# Launch all repos in parallel to fully utilise NUM_PROCS across repos.
+PIDS=()
 for REPO in "${REPOS[@]}"; do
   TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
   if [ -z "$TASKS_MAP" ]; then
@@ -88,7 +90,13 @@ for REPO in "${REPOS[@]}"; do
     --conv-round-limit "$ROUND" \
     --output-dir "$OUT_DIR" \
     --setup-dir "$SETUP_DIR" \
-    --results-path "$RESULT_DIR"
+    --results-path "$RESULT_DIR" &
+  PIDS+=($!)
+done
+
+# Wait for all repos and fail if any errored
+for PID in "${PIDS[@]}"; do
+  wait "$PID"
 done
 
 echo "=== Done ==="

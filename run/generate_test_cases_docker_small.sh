@@ -65,27 +65,20 @@ PY
     --in-place
 done
 
-# Step 2: Run the multi-agent env setup (Dockerfile + eval.sh generation)
+# Step 2: Prepare task lists, then run all repos in parallel.
 for REPO in "${REPOS[@]}"; do
   TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
-  if [ -z "$TASKS_MAP" ]; then
-    echo "=== No instances_selected file found for $REPO, skipping ==="
-    continue
-  fi
+  if [ -z "$TASKS_MAP" ]; then continue; fi
   OUT_DIR="$DATA_DIR/$REPO/setup_output_small"
-  RESULT_DIR="$OUT_DIR/results"
   TASK_LIST="$OUT_DIR/task_list_small.txt"
-  mkdir -p "$OUT_DIR" "$RESULT_DIR"
+  mkdir -p "$OUT_DIR" "$OUT_DIR/results"
 
-  export TASKS_MAP TASK_LIST MAX_INSTANCES
+  TASKS_MAP="$TASKS_MAP" TASK_LIST="$TASK_LIST" MAX_INSTANCES="$MAX_INSTANCES" \
   python3 - <<'PY'
-import json
-import os
-
+import json, os
 tasks_map = os.environ["TASKS_MAP"]
 task_list = os.environ["TASK_LIST"]
 max_instances = int(os.environ["MAX_INSTANCES"])
-
 ids = []
 with open(tasks_map, "r", encoding="utf-8") as f:
     for line in f:
@@ -97,10 +90,18 @@ with open(tasks_map, "r", encoding="utf-8") as f:
             ids.append(obj["instance_id"])
         if len(ids) >= max_instances:
             break
-
 with open(task_list, "w", encoding="utf-8") as f:
     f.write("\n".join(ids))
 PY
+done
+
+PIDS=()
+for REPO in "${REPOS[@]}"; do
+  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
+  if [ -z "$TASKS_MAP" ]; then continue; fi
+  OUT_DIR="$DATA_DIR/$REPO/setup_output_small"
+  RESULT_DIR="$OUT_DIR/results"
+  TASK_LIST="$OUT_DIR/task_list_small.txt"
 
   echo "=== Running Stage II for $REPO with $MODEL (small test) ==="
   python3 app/main.py swe-bench \
@@ -112,7 +113,12 @@ PY
     --conv-round-limit "$ROUND" \
     --output-dir "$OUT_DIR" \
     --setup-dir "$SETUP_DIR" \
-    --results-path "$RESULT_DIR"
+    --results-path "$RESULT_DIR" &
+  PIDS+=($!)
+done
+
+for PID in "${PIDS[@]}"; do
+  wait "$PID"
 done
 
 echo "=== Done ==="
