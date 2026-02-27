@@ -24,6 +24,7 @@ MAX_INSTANCES=1
 REPOS=(
   "MiroMindAI__MiroThinker"
   "MiroMindAI__miroflow"
+  "MiroMindAI__sd-torchtune"
 )
 
 # Step 1: Add version info to instances (modifies file in-place)
