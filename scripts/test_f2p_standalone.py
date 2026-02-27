@@ -32,6 +32,24 @@ import docker
 
 EXIT_CODE_RE = re.compile(r"OMNIGRIL_EXIT_CODE=(\d+)")
 
+_ESSENTIALS_RUN = (
+    "RUN apt-get update && apt-get install -y --no-install-recommends "
+    "curl git ca-certificates && rm -rf /var/lib/apt/lists/*"
+)
+
+
+def _ensure_essentials(dockerfile: str) -> str:
+    """Insert apt-get install curl/git right after FROM line."""
+    lines = dockerfile.split("\n")
+    out = []
+    inserted = False
+    for line in lines:
+        out.append(line)
+        if not inserted and line.strip().upper().startswith("FROM "):
+            out.append(_ESSENTIALS_RUN)
+            inserted = True
+    return "\n".join(out)
+
 
 def extract_exit_code(output: str) -> int | None:
     m = EXIT_CODE_RE.search(output)
@@ -121,6 +139,8 @@ def run_f2p_for_task(task_dir: str, client: docker.DockerClient, timeout: int) -
             "https://github.com/",
             f"https://x-access-token:{token}@github.com/",
         )
+    # Ensure curl/git/ca-certificates are available before any RUN that needs them
+    dockerfile_content = _ensure_essentials(dockerfile_content)
 
     image_name = f"f2p-test-{task_id.lower()}:latest"
     container_name = f"f2p-test-{task_id.lower()}"

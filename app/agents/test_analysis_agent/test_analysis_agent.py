@@ -28,6 +28,31 @@ MAX_LINE_NUM = 600
 ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 EXIT_CODE_RE = re.compile(r"OMNIGRIL_EXIT_CODE=(\d+)")
 
+_ESSENTIALS_RUN = (
+    "RUN apt-get update && apt-get install -y --no-install-recommends "
+    "curl git ca-certificates && rm -rf /var/lib/apt/lists/*"
+)
+
+def _ensure_essentials_in_dockerfile(dockerfile: str) -> str:
+    """Inject an early apt-get layer for curl/git/ca-certificates.
+
+    LLMs frequently generate `RUN curl ...` before installing curl.
+    This inserts the essentials right after the first FROM line so that
+    every subsequent RUN can rely on them.  If the Dockerfile already
+    installs them, the extra apt-get is a harmless no-op.
+    """
+    lines = dockerfile.split("\n")
+    out: list[str] = []
+    inserted = False
+    for line in lines:
+        out.append(line)
+        # Insert right after the first FROM (possibly with --platform)
+        if not inserted and line.strip().upper().startswith("FROM "):
+            out.append(_ESSENTIALS_RUN)
+            inserted = True
+    return "\n".join(out)
+
+
 def _extract_exit_code(test_output: str) -> int | None:
     """Extract the exit code from test output; returns None if not found."""
     m = EXIT_CODE_RE.search(test_output)
@@ -386,6 +411,10 @@ class TestAnalysisAgent(Agent):
                 "https://github.com/",
                 f"https://x-access-token:{token}@github.com/",
             )
+        # Ensure essential tools (curl, git, ca-certificates) are installed
+        # before any command that needs them. LLMs often generate
+        # `RUN curl ...` before `apt-get install curl`.
+        dockerfile = _ensure_essentials_in_dockerfile(dockerfile)
         with open(dockerfile_path, "w") as f:
             f.write(dockerfile)
 
