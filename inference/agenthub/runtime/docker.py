@@ -1150,7 +1150,7 @@ class DockerRuntime(ExecutionEnvironment):
     
         reward = 0.0
 
-        EXIT_CODE_RE = re.compile(r"echo OMNIGRIL_EXIT_CODE=(\d)")
+        EXIT_CODE_RE = re.compile(r"OMNIGRIL_EXIT_CODE=(\d+)")
 
         if output:
             match = EXIT_CODE_RE.search(output)

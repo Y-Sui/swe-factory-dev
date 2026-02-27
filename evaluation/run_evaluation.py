@@ -121,7 +121,7 @@ def get_pred_report(
         print(f"[WARN] Empty run instance log content for {instance_id}")
 
     
-    EXIT_CODE_RE = re.compile(r"echo OMNIGRIL_EXIT_CODE=(\d)")
+    EXIT_CODE_RE = re.compile(r"OMNIGRIL_EXIT_CODE=(\d+)")
 
     if test_output_content:
         match = EXIT_CODE_RE.search(test_output_content)

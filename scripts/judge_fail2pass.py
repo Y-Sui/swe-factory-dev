@@ -12,7 +12,7 @@ load_dotenv()  # Load environment variables from .env file
 
 PREV_FILE_NAME  = "test_output_prev_apply.txt"
 AFTER_FILE_NAME = "test_output_after_apply.txt"
-EXIT_CODE_RE    = re.compile(r"echo OMNIGRIL_EXIT_CODE=(\d+)")
+EXIT_CODE_RE    = re.compile(r"OMNIGRIL_EXIT_CODE=(\d+)")
 
 
 def extract_exit_code(content: str) -> int | None:

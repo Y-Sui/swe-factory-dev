@@ -363,6 +363,21 @@ def  extract_eval_script_from_response(res_text: str, output_dir: str, test_patc
                     
                     script_extracted = True
                     break
-        return script_extracted 
+        # Safety net: if the LLM omitted the exit code echo, append it.
+        if script_extracted:
+            script_path_obj = pjoin(output_dir, "eval.sh")
+            skel_path_obj = pjoin(output_dir, "eval_skeleton.sh")
+            for fpath in (script_path_obj, skel_path_obj):
+                try:
+                    with open(fpath, "r") as f:
+                        content = f.read()
+                except FileNotFoundError:
+                    continue
+                if "OMNIGRIL_EXIT_CODE" not in content:
+                    content += '\nrc=$?\necho "OMNIGRIL_EXIT_CODE=$rc"\n'
+                    with open(fpath, "w") as f:
+                        f.write(content)
+
+        return script_extracted
 
 

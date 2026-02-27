@@ -378,6 +378,14 @@ class TestAnalysisAgent(Agent):
         
 
         dockerfile_path = f'{cur_build_image_dir}/Dockerfile'
+        # Inject GITHUB_TOKEN into clone URLs for private repo support.
+        # Done after logging so tokens don't leak into log files.
+        token = os.environ.get("GITHUB_TOKEN", "").strip()
+        if token:
+            dockerfile = dockerfile.replace(
+                "https://github.com/",
+                f"https://x-access-token:{token}@github.com/",
+            )
         with open(dockerfile_path, "w") as f:
             f.write(dockerfile)
 
