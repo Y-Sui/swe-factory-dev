@@ -8,6 +8,7 @@ import os
 import re
 import docker
 from argparse import ArgumentParser
+from dotenv import load_dotenv
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
@@ -71,7 +72,17 @@ def get_args(
     return parser.parse_args(from_command_line_str.split())
 
 
+def get_github_clone_url(repo: str) -> str:
+    """Build a clone URL for a GitHub repo, using GITHUB_TOKEN if available for private repos."""
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        return f"https://x-access-token:{token}@github.com/{repo}.git"
+    return f"https://github.com/{repo}.git"
+
+
 def main(args, subparser_dest_attr_name: str = "command"):
+    # Load .env file so GITHUB_TOKEN and API keys are available from local .env
+    load_dotenv()
 
     ## common options
     globals.output_dir = args.output_dir
@@ -475,7 +486,8 @@ def make_swe_tasks(
         repo_cache_name = f'{task_info['repo']}_cache'
         repo_cache_dir =  pjoin(setup_dir,repo_cache_name)
         if not os.path.isdir(repo_cache_dir):
-            github_link = f"https://github.com/{task_info['repo']}.git"
+            # Use token-authenticated URL for private repo support
+            github_link = get_github_clone_url(task_info['repo'])
             apputils.clone_repo_and_checkout(github_link, "", repo_cache_dir)
         else:
             # 可以在这里打印日志或直接跳过

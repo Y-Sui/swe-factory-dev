@@ -13,8 +13,14 @@ from loguru import logger
 
 class WriteTestAgent(Agent):
     """
-    Agent responsible for generating test files when test_patch is empty or insufficient (< 3 files).
-    Uses the LLM to generate Python test files from the problem_statement + patch.
+    Agent responsible for generating test files when test_patch is empty or insufficient.
+
+    Generates two categories of tests:
+      - Fail-to-Pass (F2P): tests that fail before the gold patch and pass after.
+      - Pass-to-Pass (P2P): regression tests that pass both before and after.
+
+    Uses multi-round reflexion (self-critique + refinement) to improve test quality.
+    Supports multiple languages via task.language field.
     """
     api_functions: list[str] = []
 
@@ -23,19 +29,25 @@ class WriteTestAgent(Agent):
         task: Task,
         output_dir: str,
         repo_basic_info: str,
+        max_reflexion_rounds: int = 2,
     ):
         super().__init__(agent_id="WriteTestAgent")
         self.task = task
         self.output_dir = os.path.abspath(output_dir)
         self.repo_basic_info = repo_basic_info
+        self.max_reflexion_rounds = max_reflexion_rounds
         self.run_count = 0
         self.generated_test_patch = None
         self.generated_test_files = []
+        # Select language-specific system prompt
+        self._language = getattr(task, "language", "python") or "python"
         self.init_msg_thread()
 
     def init_msg_thread(self) -> None:
         self.msg_thread = MessageThread()
-        self.add_system_message(write_test_utils.SYSTEM_PROMPT_WRITE_TEST)
+        # Use language-aware system prompt for proper test framework guidance
+        system_prompt = write_test_utils.get_test_system_prompt(self._language)
+        self.add_system_message(system_prompt)
         self.add_user_message(self.repo_basic_info)
 
     def get_latest_write_output_dir(self) -> str:
@@ -47,6 +59,7 @@ class WriteTestAgent(Agent):
     ) -> tuple[str, str, bool]:
         """
         Generate test files based on problem_statement and patch.
+        After initial generation, runs reflexion rounds to improve F2P/P2P quality.
         Returns raw_output, summary, success.
         """
         print_banner(f"Task {self.task.task_id} Iteration ROUND {self.iteration_num}: Test Generation")
@@ -72,13 +85,29 @@ class WriteTestAgent(Agent):
         )
         self.add_user_message(user_prompt)
 
-        # Call LLM with retries
+        # --- Phase 1: Initial test generation with retries ---
         result_msg, patch_str, test_files, success = write_test_utils.write_test_with_retries(
             self.msg_thread,
             curr_dir,
             retries=3,
             print_callback=print_callback,
         )
+
+        # --- Phase 2: Reflexion loop to improve test quality ---
+        if success and patch_str and self.max_reflexion_rounds > 0:
+            logger.info(f"Starting reflexion loop ({self.max_reflexion_rounds} rounds) to refine tests.")
+            refined_patch, refined_files = write_test_utils.refine_tests_with_reflexion(
+                msg_thread=self.msg_thread,
+                generated_patch=patch_str,
+                problem_statement=self.task.problem_statement,
+                code_patch=self.task.patch,
+                output_dir=curr_dir,
+                max_rounds=self.max_reflexion_rounds,
+                print_callback=print_callback,
+            )
+            # Update with refined results
+            patch_str = refined_patch
+            test_files = refined_files
 
         if success and patch_str:
             self.generated_test_patch = patch_str

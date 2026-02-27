@@ -13,6 +13,25 @@ from app.log import log_and_print
 from app.task import PlainTask, SweTask, Task
 from docker import DockerClient
 
+
+def _github_auth_headers() -> dict:
+    """Return GitHub API auth headers if GITHUB_TOKEN is set, else empty dict."""
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        return {"Authorization": f"token {token}"}
+    return {}
+
+
+def _inject_token_into_url(url: str) -> str:
+    """Inject GITHUB_TOKEN into a GitHub HTTPS clone URL for private repo access."""
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token and "github.com" in url and "x-access-token" not in url:
+        return url.replace(
+            "https://github.com", f"https://x-access-token:{token}@github.com"
+        )
+    return url
+
+
 class RawTask(ABC):
     @property
     @abstractmethod
@@ -129,7 +148,9 @@ class RawGithubTask(RawTask):
                 f"Path {clone_path} already exists. Removing it to get a fresh clone."
             )
             shutil.rmtree(clone_path)
-        app_utils.clone_repo(self.clone_link, str(clone_path.parent), clone_path.name)
+        # Inject token for private repo access
+        auth_link = _inject_token_into_url(self.clone_link)
+        app_utils.clone_repo(auth_link, str(clone_path.parent), clone_path.name)
         log_and_print(f"Cloned source code to {clone_path}.")
         if self.commit_hash is None:
             # let's get the current commit hash
@@ -185,8 +206,10 @@ class RawGithubTask(RawTask):
             start_line = int(code_links.group(4))
             end_line = int(code_links.group(5))
 
+            # Use auth headers for private repo raw content access
             file_contents = httpx.get(
-                f"https://raw.githubusercontent.com/{repo_name}/{commit}/{file_path}"
+                f"https://raw.githubusercontent.com/{repo_name}/{commit}/{file_path}",
+                headers=_github_auth_headers(),
             ).text.splitlines()
             fragment = "\n".join(file_contents[start_line - 1 : end_line])
 
@@ -209,7 +232,9 @@ class RawGithubTask(RawTask):
         api_url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}"
         comments_url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments"
 
-        issue_response = httpx.get(api_url)
+        # Use auth headers for private repo API access
+        headers = _github_auth_headers()
+        issue_response = httpx.get(api_url, headers=headers)
 
         if issue_response.status_code != 200:
             raise RuntimeError(
@@ -222,7 +247,7 @@ class RawGithubTask(RawTask):
         body = issue_info["body"]
 
         if use_comments:
-            comments_response = httpx.get(comments_url)
+            comments_response = httpx.get(comments_url, headers=headers)
             if comments_response.status_code != 200:
                 raise RuntimeError(
                     f"Failed to fetch comments information: {comments_response.status_code}"

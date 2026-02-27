@@ -76,7 +76,10 @@ class AgentsManager:
             "context_retrieval_agent": ContextRetrievalAgent(task, output_dir, self.repo_basic_info),
         }
         self.set_agent_status('all',False)
-        self.needs_test_generation = len(self.test_files) < 3
+        # Trigger test generation when test_patch is empty/missing OR fewer than 3 test files
+        self.needs_test_generation = (
+            not (self.task.test_patch or "").strip() or len(self.test_files) < 3
+        )
         if self.needs_test_generation:
             self.agents_dict["write_test_agent"] = WriteTestAgent(task, output_dir, self.repo_basic_info)
             self.set_agent_status("write_test_agent", False)
@@ -291,14 +294,20 @@ class AgentsManager:
                         logger.info(f"F2P safety gate: LLM said is_finish=True but F2P={f2p}. Overriding.")
                         is_finish = False
                         if f2p == "PASS2PASS":
-                            # Tests too weak — route to write_test_agent
-                            if self.needs_test_generation and "write_test_agent" in self.agents_dict:
-                                self.set_agent_status("write_test_agent", False)
-                                self.set_agent_status("write_eval_script_agent", False)
-                                self.agents_dict['write_test_agent'].add_user_message(
-                                    "F2P validation shows PASS2PASS: tests pass even without the gold patch. "
-                                    "The tests do not capture the bug. Please strengthen the tests so they "
-                                    "fail on the unfixed code.\n\n")
+                            # Tests too weak — route to write_test_agent.
+                            # Dynamically create write_test_agent if it doesn't exist yet
+                            # (can happen when original test_patch had >= 3 files but they were too weak).
+                            if "write_test_agent" not in self.agents_dict:
+                                self.needs_test_generation = True
+                                self.agents_dict["write_test_agent"] = WriteTestAgent(
+                                    self.task, self.output_dir, self.repo_basic_info
+                                )
+                            self.set_agent_status("write_test_agent", False)
+                            self.set_agent_status("write_eval_script_agent", False)
+                            self.agents_dict['write_test_agent'].add_user_message(
+                                "F2P validation shows PASS2PASS: tests pass even without the gold patch. "
+                                "The tests do not capture the bug. Please strengthen the F2P tests so they "
+                                "fail on the unfixed code. Also ensure P2P regression tests still pass.\n\n")
                         elif f2p == "FAIL2FAIL":
                             # Environment issue — route to dockerfile + eval script agents
                             self.set_agent_status("write_docker_agent", False)
@@ -311,12 +320,16 @@ class AgentsManager:
                                 "There is likely an environment or test setup issue. Please review and fix.\n\n")
                         elif f2p == "PASS2FAIL":
                             # Tests broken/inverted — route to write_test_agent
-                            if self.needs_test_generation and "write_test_agent" in self.agents_dict:
-                                self.set_agent_status("write_test_agent", False)
-                                self.set_agent_status("write_eval_script_agent", False)
-                                self.agents_dict['write_test_agent'].add_user_message(
-                                    "F2P validation shows PASS2FAIL: tests pass without the gold patch but fail with it. "
-                                    "The tests are broken or inverted. Please fix the test logic.\n\n")
+                            if "write_test_agent" not in self.agents_dict:
+                                self.needs_test_generation = True
+                                self.agents_dict["write_test_agent"] = WriteTestAgent(
+                                    self.task, self.output_dir, self.repo_basic_info
+                                )
+                            self.set_agent_status("write_test_agent", False)
+                            self.set_agent_status("write_eval_script_agent", False)
+                            self.agents_dict['write_test_agent'].add_user_message(
+                                "F2P validation shows PASS2FAIL: tests pass without the gold patch but fail with it. "
+                                "The tests are broken or inverted. Please fix the test logic.\n\n")
 
                 if not is_finish:
                     # Soft fallback: if disable_run_test and we've done at least one full

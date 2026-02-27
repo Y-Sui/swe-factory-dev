@@ -1,11 +1,20 @@
 import hashlib
 import json
+import os
 import platform
 import re
 
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 from typing import TypedDict
+
+
+def _github_clone_url(repo: str) -> str:
+    """Build a clone URL, injecting GITHUB_TOKEN for private repo access if available."""
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        return f"https://x-access-token:{token}@github.com/{repo}"
+    return f"https://github.com/{repo}"
 # from constants import (
 #     SWEbenchInstance,
 #     MAP_REPO_TO_INSTALL,
@@ -150,9 +159,11 @@ def make_repo_script_list(install, repo, repo_directory, base_commit, env_name):
     Create a list of bash commands to set up the repository for testing.
     This is the setup script for the instance image.
     """
+    # Use token-authenticated URL for private repo support
+    clone_url = _github_clone_url(repo)
     if 'python' in install:
         setup_commands = [
-            f"git clone -o origin https://github.com/{repo} {repo_directory}",
+            f"git clone -o origin {clone_url} {repo_directory}",
             f"chmod -R 777 {repo_directory}",  # So nonroot user can run tests
             f"cd {repo_directory}",
             f"git reset --hard {base_commit}",
@@ -177,7 +188,7 @@ def make_repo_script_list(install, repo, repo_directory, base_commit, env_name):
             setup_commands.append(install["install"])
     elif 'java' in install:
         setup_commands = [
-            f"git clone -o origin https://github.com/{repo} {repo_directory}",
+            f"git clone -o origin {clone_url} {repo_directory}",
             f"chmod -R 777 {repo_directory}",  # So nonroot user can run tests
             f"cd {repo_directory}",
             f"git reset --hard {base_commit}",
@@ -200,7 +211,7 @@ def make_repo_script_list(install, repo, repo_directory, base_commit, env_name):
     elif 'nodejs' in install:
         if 'null' in repo.lower():
             setup_commands = [
-                f"git clone --depth 1 https://github.com/{repo} {repo_directory}",  # Shallow clone to only fetch the latest commit
+                f"git clone --depth 1 {clone_url} {repo_directory}",  # Shallow clone to only fetch the latest commit
                 f"chmod -R 777 {repo_directory}",  # So nonroot user can run tests
                 f"cd {repo_directory}",
                 f"git fetch --depth=1 origin {base_commit}",  # Fetch only the specific commit you need
@@ -210,9 +221,9 @@ def make_repo_script_list(install, repo, repo_directory, base_commit, env_name):
                 # Make sure conda is available for later use
             ]
 
-        else: 
+        else:
             setup_commands = [
-                f"git clone -o origin https://github.com/{repo} {repo_directory}",
+                f"git clone -o origin {clone_url} {repo_directory}",
                 f"chmod -R 777 {repo_directory}",  # So nonroot user can run tests
                 f"cd {repo_directory}",
                 f"git reset --hard {base_commit}",
