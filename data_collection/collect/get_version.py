@@ -67,10 +67,8 @@ def prepare_repo_cache(tasks: List[Dict], cache_dir: str, token: str = None) -> 
         repo = task["repo"]
         if repo in repo_cache:
             continue
-        if token:
-            repo_url = f"https://x-access-token:{token}@github.com/{repo}.git"
-        else:
-            repo_url = f"https://github.com/{repo}.git"
+        from swe_factory_utils import inject_github_token
+        repo_url = inject_github_token(f"https://github.com/{repo}.git")
         local_path = os.path.join(cache_dir, repo.replace("/", "__"))
         if os.path.isdir(local_path):
             repo_cache[repo] = local_path

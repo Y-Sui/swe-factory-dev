@@ -11,10 +11,8 @@ from typing import TypedDict
 
 def _github_clone_url(repo: str) -> str:
     """Build a clone URL, injecting GITHUB_TOKEN for private repo access if available."""
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if token:
-        return f"https://x-access-token:{token}@github.com/{repo}"
-    return f"https://github.com/{repo}"
+    from swe_factory_utils import inject_github_token
+    return inject_github_token(f"https://github.com/{repo}")
 # from constants import (
 #     SWEbenchInstance,
 #     MAP_REPO_TO_INSTALL,

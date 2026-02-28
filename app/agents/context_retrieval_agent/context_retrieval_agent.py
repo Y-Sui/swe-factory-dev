@@ -151,7 +151,11 @@ class ContextRetrievalAgent(Agent):
                 print_callback=print_callback,
             )
             # get_action
-            res_text, *_ = common.SELECTED_MODEL.call(self.msg_thread.to_msg())
+            try:
+                res_text, *_ = common.SELECTED_MODEL.call(self.msg_thread.to_msg())
+            except Exception as e:
+                logger.error(f"LLM call failed in context retrieval round {context_retrieval_round}: {e}")
+                break
             self.add_model_message(res_text, tools=[])
             print_retrieval(res_text, f"context retrieval {context_retrieval_round}", print_callback=print_callback)
 

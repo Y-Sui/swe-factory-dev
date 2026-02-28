@@ -22,14 +22,7 @@ def _github_auth_headers() -> dict:
     return {}
 
 
-def _inject_token_into_url(url: str) -> str:
-    """Inject GITHUB_TOKEN into a GitHub HTTPS clone URL for private repo access."""
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if token and "github.com" in url and "x-access-token" not in url:
-        return url.replace(
-            "https://github.com", f"https://x-access-token:{token}@github.com"
-        )
-    return url
+from swe_factory_utils import inject_github_token as _inject_token_into_url
 
 
 class RawTask(ABC):
@@ -71,7 +64,7 @@ class RawSweTask(RawTask):
         task_id = self.task_id
         setup_info = self.setup_info
         task_info = self.task_info
-        language = task_info.get('language','None')
+        language = task_info.get('language') or 'python'
         client = self.client
         return SweTask(
             task_id=task_id,

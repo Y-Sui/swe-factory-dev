@@ -240,7 +240,11 @@ def write_eval_script_with_retries(
         raw_dockerfile_file = pjoin(output_dir, f"agent_eval_script_raw_{i}")
 
         # actually calling model
-        res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg())
+        try:
+            res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg())
+        except Exception as e:
+            logger.error(f"LLM call failed in eval script generation try {i}: {e}")
+            continue
 
         new_thread.add_model(res_text, [])  # no tools
 

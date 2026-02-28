@@ -402,7 +402,7 @@ def extract_problem_statement_and_hints_with_official_github_api(pull: dict, rep
         url = f'https://api.github.com/repos/{repo.owner}/{repo.name}/issues/{issue_number}'
         try:
             issue = repo.github_api(url=url, token=repo.token).json()
-        except:
+        except Exception:
             issue = None
         # logger.info('extracting statement')
         # issue = repo.call_api(

@@ -48,6 +48,7 @@ class WriteEvalScriptAgent(Agent):
         self.repo_basic_info = repo_basic_info
         self.reference_setup = None
         self.dockerfile = None
+        self.pending_guidance = None
         self.init_msg_thread()
 
 
@@ -152,8 +153,14 @@ class WriteEvalScriptAgent(Agent):
         Generate or modify the evaluation script based on the shared message_thread.
         Returns raw_output, summary, success.
         """
+        # Reset thread on subsequent runs to prevent unbounded growth
+        if self.run_count > 0:
+            self.init_msg_thread()
+            if self.pending_guidance:
+                self.add_user_message(self.pending_guidance)
+                self.pending_guidance = None
         print_banner(f"Task {self.task.task_id} Iteration ROUND {self.iteration_num}: Eval Script Generation ")
-        
+
         prev_dir = self.get_latest_write_output_dir()
         self.run_count += 1
         curr_dir = self.get_latest_write_output_dir()
@@ -204,7 +211,6 @@ class WriteEvalScriptAgent(Agent):
         eval_script_output_dir = self.get_latest_write_output_dir()
         conversation_file = pjoin(eval_script_output_dir, f"conversation.json")
         self.msg_thread.save_to_file(conversation_file)
-        # self.init_msg_thread()
         return task_output, summary, ok
 
 

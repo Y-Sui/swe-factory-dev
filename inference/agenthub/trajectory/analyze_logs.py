@@ -61,8 +61,8 @@ def analyze_log(
             trajectories_with_idx.append(
                 (Trajectory.load_from_model_dump_json(line), idx)
             )
-        except:
-            print(f"Error decoding JSON for line {idx}")
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            print(f"Error decoding JSON for line {idx}: {e}")
             continue
 
     # trajectories_with_idx: list[tuple[Trajectory, int]] = [

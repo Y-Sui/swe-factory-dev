@@ -269,7 +269,7 @@ class AgentsManager:
                 if isinstance(analysis, str):
                     try:
                         analysis = json.loads(analysis)
-                    except:
+                    except (json.JSONDecodeError, ValueError, TypeError):
                         analysis = {}
                 elif not isinstance(analysis, dict):
                     analysis = {}
@@ -304,20 +304,26 @@ class AgentsManager:
                                 )
                             self.set_agent_status("write_test_agent", False)
                             self.set_agent_status("write_eval_script_agent", False)
-                            self.agents_dict['write_test_agent'].add_user_message(
+                            f2p_msg = (
                                 "F2P validation shows PASS2PASS: tests pass even without the gold patch. "
                                 "The tests do not capture the bug. Please strengthen the F2P tests so they "
                                 "fail on the unfixed code. Also ensure P2P regression tests still pass.\n\n")
+                            analysis_text = analysis.get("analysis", "")
+                            if analysis_text:
+                                f2p_msg += f"Test analysis details:\n{analysis_text}\n\n"
+                            self.agents_dict['write_test_agent'].pending_guidance = f2p_msg
                         elif f2p == "FAIL2FAIL":
                             # Environment issue — route to dockerfile + eval script agents
                             self.set_agent_status("write_docker_agent", False)
                             self.set_agent_status("write_eval_script_agent", False)
-                            self.agents_dict['write_docker_agent'].add_user_message(
+                            f2p_msg = (
                                 "F2P validation shows FAIL2FAIL: tests fail both with and without the gold patch. "
                                 "There is likely an environment or test setup issue. Please review and fix.\n\n")
-                            self.agents_dict['write_eval_script_agent'].add_user_message(
-                                "F2P validation shows FAIL2FAIL: tests fail both with and without the gold patch. "
-                                "There is likely an environment or test setup issue. Please review and fix.\n\n")
+                            analysis_text = analysis.get("analysis", "")
+                            if analysis_text:
+                                f2p_msg += f"Test analysis details:\n{analysis_text}\n\n"
+                            self.agents_dict['write_docker_agent'].pending_guidance = f2p_msg
+                            self.agents_dict['write_eval_script_agent'].pending_guidance = f2p_msg
                         elif f2p == "PASS2FAIL":
                             # Tests broken/inverted — route to write_test_agent
                             if "write_test_agent" not in self.agents_dict:
@@ -327,9 +333,13 @@ class AgentsManager:
                                 )
                             self.set_agent_status("write_test_agent", False)
                             self.set_agent_status("write_eval_script_agent", False)
-                            self.agents_dict['write_test_agent'].add_user_message(
+                            f2p_msg = (
                                 "F2P validation shows PASS2FAIL: tests pass without the gold patch but fail with it. "
                                 "The tests are broken or inverted. Please fix the test logic.\n\n")
+                            analysis_text = analysis.get("analysis", "")
+                            if analysis_text:
+                                f2p_msg += f"Test analysis details:\n{analysis_text}\n\n"
+                            self.agents_dict['write_test_agent'].pending_guidance = f2p_msg
 
                 if not is_finish:
                     # Fallback: if F2P is objectively FAIL2PASS but LLM analysis
@@ -373,7 +383,9 @@ class AgentsManager:
                         else:
                             prefix_prompt = "After analysis, you need modify the dockerfile. Here is the analysis:\n"
                         self.set_agent_status("write_docker_agent",False)
-                        self.agents_dict['write_docker_agent'].add_user_message(f'{prefix_prompt}{guidance_for_write_dockerfile_agent}\n\n')
+                        guidance_text = f'{prefix_prompt}{guidance_for_write_dockerfile_agent}\n\n'
+                        agent = self.agents_dict['write_docker_agent']
+                        agent.pending_guidance = (agent.pending_guidance or "") + guidance_text
 
                     guidance_for_write_eval_script_agent = analysis.get("guidance_for_write_eval_script_agent", None)
                     if guidance_for_write_eval_script_agent:
@@ -382,15 +394,25 @@ class AgentsManager:
                         else:
                             prefix_prompt = "After analysis, you need modify the eval script. Here is the analysis:\n"
                         self.set_agent_status("write_eval_script_agent",False)
-                        self.agents_dict['write_eval_script_agent'].add_user_message(f'{prefix_prompt}{guidance_for_write_eval_script_agent}\n\n')
+                        guidance_text = f'{prefix_prompt}{guidance_for_write_eval_script_agent}\n\n'
+                        agent = self.agents_dict['write_eval_script_agent']
+                        agent.pending_guidance = (agent.pending_guidance or "") + guidance_text
 
                     guidance_for_write_test_agent = analysis.get("guidance_for_write_test_agent", None)
-                    if guidance_for_write_test_agent and self.needs_test_generation and "write_test_agent" in self.agents_dict:
-                        prefix_prompt = "After analysis, the generated tests need improvement. Here is the feedback:\n"
-                        self.set_agent_status("write_test_agent", False)
-                        self.set_agent_status("write_eval_script_agent", False)
-                        self.agents_dict['write_test_agent'].add_user_message(
-                            f'{prefix_prompt}{guidance_for_write_test_agent}\n\n')
+                    if guidance_for_write_test_agent:
+                        # Dynamically create write_test_agent if it doesn't exist
+                        if "write_test_agent" not in self.agents_dict:
+                            self.needs_test_generation = True
+                            self.agents_dict["write_test_agent"] = WriteTestAgent(
+                                self.task, self.output_dir, self.repo_basic_info
+                            )
+                        if self.needs_test_generation:
+                            prefix_prompt = "After analysis, the generated tests need improvement. Here is the feedback:\n"
+                            self.set_agent_status("write_test_agent", False)
+                            self.set_agent_status("write_eval_script_agent", False)
+                            guidance_text = f'{prefix_prompt}{guidance_for_write_test_agent}\n\n'
+                            agent = self.agents_dict['write_test_agent']
+                            agent.pending_guidance = (agent.pending_guidance or "") + guidance_text
 
         else:
             log_msg = "Exceed largest number of tries.."

@@ -364,9 +364,13 @@ def run_proxy(text: str) -> tuple[str, MessageThread]:
     msg_thread = MessageThread()
     msg_thread.add_system(PROXY_PROMPT)
     msg_thread.add_user(f'<analysis>\n{text}</analysis>')
-    res_text, *_ = common.SELECTED_MODEL.call(
-        msg_thread.to_msg(), response_format="json_object"
-    )
+    try:
+        res_text, *_ = common.SELECTED_MODEL.call(
+            msg_thread.to_msg(), response_format="json_object"
+        )
+    except Exception as e:
+        logger.error(f"LLM call failed in run_proxy: {e}")
+        return None, msg_thread
 
     msg_thread.add_model(res_text, [])  # no tools
 
@@ -519,10 +523,14 @@ def browse_file_run(content: str, custom_query: str) -> tuple[str, MessageThread
     msg_thread = MessageThread()
     msg_thread.add_system(BROWSE_CONTENT_PROMPT)
     msg_thread.add_user(f"File content:\n{content}\n")  # Truncate to prevent overflow
-    msg_thread.add_user(f"Custom query from user:\n{custom_query}\n") 
-    res_text, *_ = common.SELECTED_MODEL.call(
-        msg_thread.to_msg()
-    )
+    msg_thread.add_user(f"Custom query from user:\n{custom_query}\n")
+    try:
+        res_text, *_ = common.SELECTED_MODEL.call(
+            msg_thread.to_msg()
+        )
+    except Exception as e:
+        logger.error(f"LLM call failed in browse_file_run: {e}")
+        return None, msg_thread
     msg_thread.add_model(res_text, [])
     return res_text, msg_thread
 

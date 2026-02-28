@@ -74,10 +74,8 @@ def get_args(
 
 def get_github_clone_url(repo: str) -> str:
     """Build a clone URL for a GitHub repo, using GITHUB_TOKEN if available for private repos."""
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if token:
-        return f"https://x-access-token:{token}@github.com/{repo}.git"
-    return f"https://github.com/{repo}.git"
+    from swe_factory_utils import inject_github_token
+    return inject_github_token(f"https://github.com/{repo}.git")
 
 
 def main(args, subparser_dest_attr_name: str = "command"):

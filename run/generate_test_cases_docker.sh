@@ -95,8 +95,10 @@ for REPO in "${REPOS[@]}"; do
 done
 
 # Wait for all repos and fail if any errored
+FAIL=0
 for PID in "${PIDS[@]}"; do
-  wait "$PID"
+  wait "$PID" || FAIL=1
 done
+[ "$FAIL" -eq 0 ] || exit 1
 
 echo "=== Done ==="

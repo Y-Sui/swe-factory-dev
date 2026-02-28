@@ -18,57 +18,23 @@ from there; otherwise task dirs are found directly.
 import argparse
 import json
 import os
-import re
-import signal
 import sys
 import tarfile
 import tempfile
 import threading
-import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+# Ensure project root is on sys.path so swe_factory_utils is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import docker
 
-EXIT_CODE_RE = re.compile(r"OMNIGRIL_EXIT_CODE=(\d+)")
-
-_ESSENTIALS_RUN = (
-    "RUN apt-get update && apt-get install -y --no-install-recommends "
-    "curl git ca-certificates && rm -rf /var/lib/apt/lists/*"
+from swe_factory_utils import (
+    extract_exit_code,
+    classify_f2p,
+    ensure_essentials_in_dockerfile as _ensure_essentials,
 )
-
-
-def _ensure_essentials(dockerfile: str) -> str:
-    """Insert apt-get install curl/git right after FROM line."""
-    lines = dockerfile.split("\n")
-    out = []
-    inserted = False
-    for line in lines:
-        out.append(line)
-        if not inserted and line.strip().upper().startswith("FROM "):
-            out.append(_ESSENTIALS_RUN)
-            inserted = True
-    return "\n".join(out)
-
-
-def extract_exit_code(output: str) -> int | None:
-    m = EXIT_CODE_RE.search(output)
-    return int(m.group(1)) if m else None
-
-
-def classify_f2p(pre_exit: int | None, post_exit: int | None) -> str:
-    if pre_exit is None or post_exit is None:
-        return "ERROR"
-    pre_pass = pre_exit == 0
-    post_pass = post_exit == 0
-    if not pre_pass and post_pass:
-        return "FAIL2PASS"
-    elif pre_pass and post_pass:
-        return "PASS2PASS"
-    elif not pre_pass and not post_pass:
-        return "FAIL2FAIL"
-    else:
-        return "PASS2FAIL"
 
 
 def copy_to_container(container, src: Path, dst: Path):
@@ -79,9 +45,7 @@ def copy_to_container(container, src: Path, dst: Path):
         data = f.read()
     container.exec_run(f"mkdir -p {dst.parent}")
     container.put_archive(os.path.dirname(dst), data)
-    container.exec_run(f"tar -xf {dst}.tar -C {dst.parent}")
     tar_path.unlink()
-    container.exec_run(f"rm {dst}.tar")
 
 
 def exec_run_with_timeout(container, cmd, timeout=1800):
@@ -132,15 +96,29 @@ def run_f2p_for_task(task_dir: str, client: docker.DockerClient, timeout: int) -
     with open(eval_path) as f:
         eval_content = f.read()
 
-    # Inject GITHUB_TOKEN for private repos
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if token:
-        dockerfile_content = dockerfile_content.replace(
-            "https://github.com/",
-            f"https://x-access-token:{token}@github.com/",
-        )
     # Ensure curl/git/ca-certificates are available before any RUN that needs them
     dockerfile_content = _ensure_essentials(dockerfile_content)
+
+    # Inject ARG GITHUB_TOKEN for private repo support via --build-arg
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token and "github.com" in dockerfile_content:
+        lines = dockerfile_content.split("\n")
+        out = []
+        arg_inserted = False
+        for line in lines:
+            out.append(line)
+            if not arg_inserted and line.strip().upper().startswith("FROM "):
+                out.append("ARG GITHUB_TOKEN")
+                arg_inserted = True
+        dockerfile_content = "\n".join(out)
+        dockerfile_content = dockerfile_content.replace(
+            "https://github.com/",
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/",
+        )
+
+    buildargs = {}
+    if token:
+        buildargs["GITHUB_TOKEN"] = token
 
     image_name = f"f2p-test-{task_id.lower()}:latest"
     container_name = f"f2p-test-{task_id.lower()}"
@@ -155,16 +133,6 @@ def run_f2p_for_task(task_dir: str, client: docker.DockerClient, timeout: int) -
         # Build image
         try:
             print(f"  [{task_id}] Building Docker image...")
-            client.api.build(
-                path=build_dir,
-                tag=image_name,
-                rm=True,
-                forcerm=True,
-                decode=True,
-                platform="linux/x86_64",
-                nocache=False,
-            )
-            # Consume the generator to complete the build
             for chunk in client.api.build(
                 path=build_dir,
                 tag=image_name,
@@ -173,6 +141,7 @@ def run_f2p_for_task(task_dir: str, client: docker.DockerClient, timeout: int) -
                 decode=True,
                 platform="linux/x86_64",
                 nocache=False,
+                buildargs=buildargs or None,
             ):
                 if "errorDetail" in chunk:
                     err = chunk["errorDetail"]["message"]

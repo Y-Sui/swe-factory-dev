@@ -427,7 +427,11 @@ def write_test_with_retries(
         raw_output_file = pjoin(output_dir, f"agent_write_test_raw_{i}")
 
         # Call the model
-        res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg())
+        try:
+            res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg())
+        except Exception as e:
+            logger.error(f"LLM call failed in test generation try {i}: {e}")
+            continue
         new_thread.add_model(res_text, [])
 
         logger.info(f"Raw test generation output produced in try {i}. Writing to file.")
@@ -496,7 +500,11 @@ def refine_tests_with_reflexion(
         )
         msg_thread.add_user(critique_prompt)
 
-        critique_text, *_ = common.SELECTED_MODEL.call(msg_thread.to_msg())
+        try:
+            critique_text, *_ = common.SELECTED_MODEL.call(msg_thread.to_msg())
+        except Exception as e:
+            logger.error(f"LLM call failed in reflexion critique round {round_num}: {e}")
+            break
         msg_thread.add_model(critique_text, [])
 
         # Save critique
@@ -519,7 +527,11 @@ def refine_tests_with_reflexion(
         )
         msg_thread.add_user(refine_prompt)
 
-        refined_text, *_ = common.SELECTED_MODEL.call(msg_thread.to_msg())
+        try:
+            refined_text, *_ = common.SELECTED_MODEL.call(msg_thread.to_msg())
+        except Exception as e:
+            logger.error(f"LLM call failed in reflexion refine round {round_num}: {e}")
+            break
         msg_thread.add_model(refined_text, [])
 
         # Save raw refinement output

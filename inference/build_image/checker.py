@@ -26,13 +26,7 @@ def _strip_ansi(text: str) -> str:
 
 DEFAULT_TOOL_NAMES = ["search", "file_editor", "finish", "execute_bash"]
 
-EXIT_CODE_RE = re.compile(r"OMNIGRIL_EXIT_CODE=(\d+)")
-
-
-def extract_exit_code(content: str) -> int | None:
-    """Parses OMNIGRIL exit code marker from the combined stdout/stderr."""
-    match = EXIT_CODE_RE.search(content)
-    return int(match.group(1)) if match else None
+from swe_factory_utils import extract_exit_code
 
 
 # ---------------------------------------------------------------------------

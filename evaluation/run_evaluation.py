@@ -10,13 +10,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tqdm import tqdm
 from docker import DockerClient
-# from constants import (
-#     # APPLY_PATCH_FAIL,
-#     # APPLY_PATCH_PASS,
-#     INSTANCE_IMAGE_BUILD_DIR,
-#     RUN_INSTANCE_LOG_DIR,
-# )
-import re
+
+from swe_factory_utils import extract_exit_code
 from docker_utils import (
     remove_image,
     copy_to_container,
@@ -121,13 +116,10 @@ def get_pred_report(
         print(f"[WARN] Empty run instance log content for {instance_id}")
 
     
-    EXIT_CODE_RE = re.compile(r"OMNIGRIL_EXIT_CODE=(\d+)")
-
     if test_output_content:
-        match = EXIT_CODE_RE.search(test_output_content)
-        if match:
-            exit_code = match.group(1)
-            if exit_code == "0":
+        exit_code = extract_exit_code(test_output_content)
+        if exit_code is not None:
+            if exit_code == 0:
                 report_map[instance_id]["resolved"] = True
         else:
             print(f"[WARN] No exit code found in test output for {instance_id}")

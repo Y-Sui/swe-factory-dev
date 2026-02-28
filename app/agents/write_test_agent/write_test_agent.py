@@ -41,6 +41,7 @@ class WriteTestAgent(Agent):
         self.generated_test_files = []
         # Select language-specific system prompt
         self._language = getattr(task, "language", "python") or "python"
+        self.pending_guidance = None
         self.init_msg_thread()
 
     def init_msg_thread(self) -> None:
@@ -62,6 +63,12 @@ class WriteTestAgent(Agent):
         After initial generation, runs reflexion rounds to improve F2P/P2P quality.
         Returns raw_output, summary, success.
         """
+        # Reset thread on subsequent runs to prevent unbounded growth
+        if self.run_count > 0:
+            self.init_msg_thread()
+            if self.pending_guidance:
+                self.add_user_message(self.pending_guidance)
+                self.pending_guidance = None
         print_banner(f"Task {self.task.task_id} Iteration ROUND {self.iteration_num}: Test Generation")
 
         self.run_count += 1

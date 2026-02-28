@@ -577,7 +577,7 @@ class Agent:
                 response.choices[0].message.tool_calls[0].function.arguments
             )
             action = Action(function_name=function_name, parameters=parameters)
-        except:
+        except Exception:
             action = Action(function_name="", parameters={})
 
         return thought, action

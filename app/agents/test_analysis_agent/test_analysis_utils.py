@@ -324,6 +324,9 @@ def run_with_retries( msg_thread: MessageThread, disable_context_retrieval=False
         )
 
         res_text = run(msg_thread,disable_context_retrieval,disable_run_test,enable_web_search)
+        if res_text is None:
+            logger.debug("LLM call returned None. Will retry.")
+            continue
         res_text = extract_json_from_response(res_text)
         # res_text = msg_threads.append(new_thread)
         res_text = res_text.lstrip('```json').rstrip('```')
@@ -359,9 +362,13 @@ def run(msg_thread: MessageThread,disable_context_retrieval:bool,disable_run_tes
         msg_thread.add_user(ANALYZE_PROMPT_WITHOUT_RUN_TEST)
     else:
         msg_thread.add_user(ANALYZE_PROMPT)
-    res_text, *_ = common.SELECTED_MODEL.call(
-        msg_thread.to_msg(), response_format="json_object"
-    )
+    try:
+        res_text, *_ = common.SELECTED_MODEL.call(
+            msg_thread.to_msg(), response_format="json_object"
+        )
+    except Exception as e:
+        logger.error(f"LLM call failed in test analysis: {e}")
+        return None
 
     msg_thread.add_model(res_text, [])  # no tools
 
@@ -395,15 +402,16 @@ def is_valid_response(data: Any,disable_context_retrieval:bool,enable_web_search
             'guidance_for_context_retrieval_agent']
     if enable_web_search:
         key_list.append('guidance_for_web_search_agent')
+    # When is_finish is False, at least one guidance field must be non-empty
+    has_guidance = False
     for key in key_list:
-        if not data.get(key):
-            terminate = data.get(key)
-            if terminate is None:
-                return False, f"'{key}' parameter is missing"
+        val = data.get(key)
+        if val and isinstance(val, str) and val.strip():
+            has_guidance = True
+            break
 
-            if not isinstance(terminate, str):
-                return False, "'{key}' parameter must be a string"
-
+    if not has_guidance:
+        return False, "At least one guidance field must be non-empty when is_finish is False"
 
     return True, "OK"
 

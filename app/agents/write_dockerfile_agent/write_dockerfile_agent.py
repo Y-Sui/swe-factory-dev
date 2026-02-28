@@ -28,6 +28,7 @@ class WriteDockerfileAgent(Agent):
         self.run_count = 0
         self.reference_setup = None
         self.repo_basic_info = repo_basic_info
+        self.pending_guidance = None
         self.init_msg_thread()
         self.using_ubuntu_only = using_ubuntu_only
 
@@ -55,6 +56,12 @@ class WriteDockerfileAgent(Agent):
         Create or modify a Dockerfile based on the given message_thread context.
         Handles versioning, directory management, and fallback copy logic.
         """
+        # Reset thread on subsequent runs to prevent unbounded growth
+        if self.run_count > 0:
+            self.init_msg_thread()
+            if self.pending_guidance:
+                self.add_user_message(self.pending_guidance)
+                self.pending_guidance = None
         # 1. Determine previous vs current output paths
         print_banner(f"Iteration ROUND {self.iteration_num}: Dockerfile Generation ")
         prev_dir = self.get_latest_write_dockerfile_output_dir()
@@ -100,7 +107,6 @@ class WriteDockerfileAgent(Agent):
         dockerfile_output_dir = self.get_latest_write_dockerfile_output_dir()
         conversation_file = pjoin(dockerfile_output_dir, f"conversation.json")
         self.msg_thread.save_to_file(conversation_file)
-        # self.init_msg_thread()
         return task_output, summary, is_ok
 
     def _read_file(self, path: str) -> str:

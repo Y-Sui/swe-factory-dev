@@ -60,7 +60,7 @@ def read_jsonl(gpath: str) -> List[Dict]:
             for line in file:
                 try:
                     data.append(json.loads(line))
-                except:
+                except (json.JSONDecodeError, ValueError):
                     continue
     return data
 

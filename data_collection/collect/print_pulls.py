@@ -64,7 +64,7 @@ def main(repo_name: str, output: str, token: Optional[str] = None,mode: Optional
         token = os.environ["GITHUB_TOKEN"]
     try:
         owner, repo = repo_name.split("/")
-    except:
+    except ValueError:
         print(repo_name)
     logger.info(repo_name)
     repo = Repo(owner, repo, token=token)

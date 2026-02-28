@@ -24,54 +24,13 @@ from app.log import (
 import json
 from os.path import join as pjoin
 import traceback
+from swe_factory_utils import (
+    extract_exit_code as _extract_exit_code,
+    classify_f2p,
+    ensure_essentials_in_dockerfile as _ensure_essentials_in_dockerfile,
+)
 MAX_LINE_NUM = 600
 ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
-EXIT_CODE_RE = re.compile(r"OMNIGRIL_EXIT_CODE=(\d+)")
-
-_ESSENTIALS_RUN = (
-    "RUN apt-get update && apt-get install -y --no-install-recommends "
-    "curl git ca-certificates && rm -rf /var/lib/apt/lists/*"
-)
-
-def _ensure_essentials_in_dockerfile(dockerfile: str) -> str:
-    """Inject an early apt-get layer for curl/git/ca-certificates.
-
-    LLMs frequently generate `RUN curl ...` before installing curl.
-    This inserts the essentials right after the first FROM line so that
-    every subsequent RUN can rely on them.  If the Dockerfile already
-    installs them, the extra apt-get is a harmless no-op.
-    """
-    lines = dockerfile.split("\n")
-    out: list[str] = []
-    inserted = False
-    for line in lines:
-        out.append(line)
-        # Insert right after the first FROM (possibly with --platform)
-        if not inserted and line.strip().upper().startswith("FROM "):
-            out.append(_ESSENTIALS_RUN)
-            inserted = True
-    return "\n".join(out)
-
-
-def _extract_exit_code(test_output: str) -> int | None:
-    """Extract the exit code from test output; returns None if not found."""
-    m = EXIT_CODE_RE.search(test_output)
-    return int(m.group(1)) if m else None
-
-def classify_f2p(pre_exit: int | None, post_exit: int | None) -> str:
-    """Classify Fail-to-Pass result from pre-patch and post-patch exit codes."""
-    if pre_exit is None or post_exit is None:
-        return "ERROR"
-    pre_pass = (pre_exit == 0)
-    post_pass = (post_exit == 0)
-    if not pre_pass and post_pass:
-        return "FAIL2PASS"
-    elif pre_pass and post_pass:
-        return "PASS2PASS"
-    elif not pre_pass and not post_pass:
-        return "FAIL2FAIL"
-    else:  # pre_pass and not post_pass
-        return "PASS2FAIL"
 class TestAnalysisAgent(Agent):
     """
     Agent responsible for:
@@ -255,7 +214,7 @@ class TestAnalysisAgent(Agent):
         else:
             logger.error(tool_output)
             logger.error('some problem in running tests')
-            return None, f'{self.agent_id} fails, somt error happens', False
+            return None, f'{self.agent_id} fails, some error happens', False
         # if we judge that we achieve the goal, terminate the process
         # if test log show that it fails, we go to plan for futrure directions
         # judge whether achieve the goal, if not planning for the work in the next stage.
@@ -279,7 +238,7 @@ class TestAnalysisAgent(Agent):
             except Exception as e:
                 to_save = {}
         else:
-            # analysis 既不是 dict 也不是 str，按需处理
+            # analysis is neither dict nor str
             to_save = {}
 
         to_save['build_image_status'] = build_image_status
@@ -340,7 +299,7 @@ class TestAnalysisAgent(Agent):
             except Exception as e:
                 to_save = {}
         else:
-            # analysis 既不是 dict 也不是 str，按需处理
+            # analysis is neither dict nor str
             to_save = {}
 
         # to_save['build_image_status'] = build_image_status
@@ -403,24 +362,39 @@ class TestAnalysisAgent(Agent):
         
 
         dockerfile_path = f'{cur_build_image_dir}/Dockerfile'
-        # Inject GITHUB_TOKEN into clone URLs for private repo support.
-        # Done after logging so tokens don't leak into log files.
-        token = os.environ.get("GITHUB_TOKEN", "").strip()
-        if token:
-            dockerfile = dockerfile.replace(
-                "https://github.com/",
-                f"https://x-access-token:{token}@github.com/",
-            )
         # Ensure essential tools (curl, git, ca-certificates) are installed
         # before any command that needs them. LLMs often generate
         # `RUN curl ...` before `apt-get install curl`.
         dockerfile = _ensure_essentials_in_dockerfile(dockerfile)
+
+        # Inject ARG GITHUB_TOKEN so the build can authenticate for private repos.
+        # The actual token is passed via buildargs (not written to the Dockerfile on disk).
+        token = os.environ.get("GITHUB_TOKEN", "").strip()
+        if token and "github.com" in dockerfile:
+            lines = dockerfile.split("\n")
+            out: list[str] = []
+            arg_inserted = False
+            for line in lines:
+                out.append(line)
+                if not arg_inserted and line.strip().upper().startswith("FROM "):
+                    out.append("ARG GITHUB_TOKEN")
+                    arg_inserted = True
+            dockerfile = "\n".join(out)
+            # Rewrite clone URLs to use the build arg
+            dockerfile = dockerfile.replace(
+                "https://github.com/",
+                "https://x-access-token:${GITHUB_TOKEN}@github.com/",
+            )
+
         with open(dockerfile_path, "w") as f:
             f.write(dockerfile)
 
-        
-        command_output = []  
-        capturing = False   
+        buildargs = {}
+        if token:
+            buildargs["GITHUB_TOKEN"] = token
+
+        command_output = []
+        capturing = False
         response = client.api.build(
             path=cur_build_image_dir,
             tag=image_name,
@@ -429,6 +403,7 @@ class TestAnalysisAgent(Agent):
             decode=True,
             platform="linux/x86_64",
             nocache=True,
+            buildargs=buildargs or None,
         )
 
         buffer = ""
