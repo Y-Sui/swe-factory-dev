@@ -2,26 +2,24 @@ import logging
 import re
 import requests
 import time
-
-from bs4 import BeautifulSoup
-from ghapi.core import GhApi
-from fastcore.net import HTTP404NotFoundError, HTTP403ForbiddenError
-from typing import Optional
-from tqdm import tqdm
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-import requests
 import csv
 from io import StringIO
 from datetime import datetime
-logger = logging.getLogger(__name__)
 
+from bs4 import BeautifulSoup
+from ghapi.core import GhApi
+from urllib.error import URLError
+from typing import Optional
+from tqdm import tqdm
 from pygments.lexers import get_lexer_for_filename
 from pygments.util import ClassNotFound
-import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 PR_KEYWORDS = {
     "close",
@@ -103,8 +101,8 @@ class Repo:
                     print(f'Error: {response.status_code}, {response.text}')
                     retries += 1
                     time.sleep(2 ** retries)
-            except HTTP404NotFoundError as e:
-                logger.info(f"[{url}] Resource not found ")
+            except requests.exceptions.RequestException as e:
+                logger.info(f"[{url}] Request failed: {e}")
                 return None
 
         return None
@@ -159,18 +157,25 @@ class Repo:
             try:
                 values = func(**kwargs)
                 return values
-            except HTTP403ForbiddenError as e:
-                while True:
-                    rl = self.api.rate_limit.get()
-                    logger.info(
-                        f"[{self.owner}/{self.name}] Rate limit exceeded, waiting for 5 minutes, remaining: {rl.resources.core.remaining}"
-                    )
-                    if rl.resources.core.remaining > 0:
-                        break
-                    time.sleep(60 * 5)
-            except HTTP404NotFoundError as e:
-                logger.info(f"[{self.owner}/{self.name}] Resource not found {kwargs}")
-                return None
+            except URLError as e:
+                # ghapi raises URLError subclasses (via fastcore) for HTTP errors.
+                # The status code is encoded in the class name (e.g. HTTP403ForbiddenError).
+                err_name = type(e).__name__
+                if "403" in err_name:
+                    while True:
+                        rl = self.api.rate_limit.get()
+                        logger.info(
+                            f"[{self.owner}/{self.name}] Rate limit exceeded, waiting for 5 minutes, remaining: {rl.resources.core.remaining}"
+                        )
+                        if rl.resources.core.remaining > 0:
+                            break
+                        time.sleep(60 * 5)
+                elif "404" in err_name:
+                    logger.info(f"[{self.owner}/{self.name}] Resource not found {kwargs}")
+                    return None
+                else:
+                    logger.error(f"[{self.owner}/{self.name}] Unexpected URLError ({err_name}): {e}")
+                    return None
 
     def extract_resolved_issues_with_official_github_api(self, pull: dict) -> list[str]:
         """
@@ -359,7 +364,7 @@ class Repo:
         direction: str = "asc",
         sort: str = "created",
         state: str = "closed",
-        quiet: str = False,
+        quiet: bool = False,
     ) -> list:
         """
         Wrapper for API call to get all PRs from repo
@@ -654,14 +659,17 @@ def get_with_retries(
     token: str = None,
     max_retries: int = 5,
     backoff_factor: float = 0.5,
-    timeout: int = 5
+    timeout: int = 5,
+    extra_headers: dict = None,
 ) -> str:
     if token and not check_token_validity(token):
         logger.warning("Invalid GitHub token, aborting request.")
         return ""
-    
+
     session = requests.Session()
     headers = {"Authorization": f"token {token}"} if token else {}
+    if extra_headers:
+        headers.update(extra_headers)
 
     retries = Retry(
         total=max_retries,
@@ -693,9 +701,15 @@ def extract_patches(pull: dict, repo: Repo) -> tuple[str, str, bool]:
         patch_change_str (str): gold patch
         patch_test_str (str): test patch
     """
-    # Convert diff to patch format with "index" lines removed
-    # patch = requests.get(pull["diff_url"]).text
-    patch = get_with_retries(pull["diff_url"],repo.token)
+    # Use the GitHub API endpoint with Accept header to fetch diffs.
+    # The web diff_url (github.com/...pull/N.diff) returns 404 for private repos
+    # even with a token, because github.com doesn't accept API-style auth headers.
+    api_diff_url = f"https://api.github.com/repos/{repo.owner}/{repo.name}/pulls/{pull['number']}"
+    patch = get_with_retries(
+        api_diff_url,
+        repo.token,
+        extra_headers={"Accept": "application/vnd.github.v3.diff"},
+    )
     if patch =='':
         return "", "", False
     if patch.endswith("\n"):
@@ -733,7 +747,7 @@ def extract_patches(pull: dict, repo: Repo) -> tuple[str, str, bool]:
             elif repo.language == 'java':
                 file_name = line.split("/")[-1]
                 if file_name.endswith(".java"):
-                    file_name.replace(".java", "")
+                    file_name = file_name.replace(".java", "")
                     if(file_name.startswith("Test") or file_name.startswith("Tests") or file_name.endswith("Test") or file_name.endswith("Tests")):
                         flag = "test"
 
@@ -882,18 +896,13 @@ def extract_problem_statement_and_hints_django_with_api(
                 url = f"https://code.djangoproject.com/ticket/{issue_number}"
                 while True:
                     resp = requests.get(url)
-                    logger.info(response.status_code )
+                    logger.info(resp.status_code )
                     if max_tries>5:
                         break
-                    if response.status_code == 200:
-                        # Read the CSV data into a list of dictionaries
-                        csv_reader = csv.DictReader(StringIO(response.text))
-                        csv_reader = list(csv_reader)
-                        # logger.info(csv_reader)
-                        csv_data = csv_reader[0]
+                    if resp.status_code == 200:
                         break
-                    elif response.status_code == 429:
-                        retry_after = response.headers.get("Retry-After")
+                    elif resp.status_code == 429:
+                        retry_after = resp.headers.get("Retry-After")
                         if retry_after:
                             logger.info(f"Too many requests. Retrying after {retry_after} seconds.")
                             time.sleep(int(retry_after))
@@ -902,7 +911,7 @@ def extract_problem_statement_and_hints_django_with_api(
                             time.sleep(120)
                         max_tries += 1
                     else:
-                        logger.info(f"Failed to retrieve data:{response.status_code}")
+                        logger.info(f"Failed to retrieve data:{resp.status_code}")
                         continue
                         
                 
