@@ -23,7 +23,7 @@ from app.prompts.prompts import (
     TEST_REFLEXION_REFINE_PROMPT,
 )
 
-# Re-export for any callers that still reference write_test_utils directly
+# Re-exports for callers that reference write_test_utils directly
 USER_PROMPT_WRITE_TEST = TEST_USER_PROMPT
 REFLEXION_CRITIQUE_PROMPT = TEST_REFLEXION_CRITIQUE_PROMPT
 REFLEXION_REFINE_PROMPT = TEST_REFLEXION_REFINE_PROMPT
@@ -80,52 +80,66 @@ def summarize_large_patch(patch: str, max_chars: int = 15000) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Test patch extraction
+# Test file extraction and patch generation
 # ---------------------------------------------------------------------------
 
-def extract_test_patch_from_response(res_text: str, output_dir: str) -> tuple[str | None, list[str]]:
-    """Extract test patch from LLM response. Returns (patch_str, test_file_list)."""
-    patch_content = None
+def extract_test_files_from_response(res_text: str) -> dict[str, str]:
+    """Extract test files from LLM response using <test_file path="..."> tags.
+    Returns a dict mapping relative path -> file content.
+    """
+    files: dict[str, str] = {}
+    for m in re.finditer(r'<test_file\s+path="([^"]+)">([\s\S]*?)</test_file>', res_text):
+        path = m.group(1).strip()
+        content = m.group(2)
+        # Strip a single leading newline if present (tag formatting artefact)
+        if content.startswith('\n'):
+            content = content[1:]
+        if path:
+            files[path] = content
+    return files
 
-    # Pattern 1: <test_patch> tags
-    matches = re.findall(r"<test_patch>([\s\S]*?)</test_patch>", res_text)
-    for content in matches:
-        clean = content.strip()
-        if clean:
-            lines = clean.splitlines()
-            if len(lines) >= 2 and '```' in lines[0] and '```' in lines[-1]:
-                lines = lines[1:-1]
-            clean = '\n'.join(lines)
-            if 'diff --git' in clean or '---' in clean:
-                patch_content = clean
-                break
 
-    # Pattern 2: ```diff code blocks
-    if not patch_content:
-        diff_blocks = re.findall(r"```\s*diff\s*([\s\S]*?)```", res_text, re.IGNORECASE)
-        for content in diff_blocks:
-            clean = content.strip()
-            if clean and ('diff --git' in clean or '---' in clean):
-                patch_content = clean
-                break
-
-    if not patch_content:
-        return None, []
-
-    idx = patch_content.find('diff --git')
-    if idx > 0:
-        patch_content = patch_content[idx:]
-    elif idx < 0:
-        return None, []
-
-    test_files = re.findall(r'\+\+\+ b/(.*)', patch_content)
+def build_patch_from_files(files: dict[str, str], output_dir: str) -> tuple[str, list[str]]:
+    """Write files to output_dir and produce a unified diff using the system diff command.
+    Returns (patch_str, list_of_relative_paths).
+    """
+    import subprocess
 
     os.makedirs(output_dir, exist_ok=True)
-    patch_path = pjoin(output_dir, "generated_test_patch.diff")
-    with open(patch_path, "w") as f:
-        f.write(patch_content)
+    patch_parts: list[str] = []
 
-    return patch_content, test_files
+    for rel_path, content in files.items():
+        full_path = pjoin(output_dir, rel_path)
+        parent = os.path.dirname(full_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        # Use `diff /dev/null <file>` to produce a standard unified diff for a new file.
+        # Exit code 1 = differences found (expected for new files), 2 = error.
+        # Do NOT use --label for /dev/null — git apply needs to see `--- /dev/null` to
+        # recognise this as a new-file creation. Only fix the +++ line to use b/<rel_path>.
+        result = subprocess.run(
+            ["diff", "-u", "/dev/null", full_path],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 2:
+            logger.warning(f"diff failed for {rel_path}: {result.stderr}")
+            continue
+
+        # Replace the absolute path in the +++ line with the canonical b/<rel_path> form.
+        stdout = result.stdout.replace(f"+++ {full_path}", f"+++ b/{rel_path}", 1)
+        # Prepend the git diff header so git apply recognises it
+        diff_block = f"diff --git a/{rel_path} b/{rel_path}\n" + stdout
+        patch_parts.append(diff_block)
+
+    patch_str = "\n".join(patch_parts)
+    patch_path = pjoin(output_dir, "generated_test_patch.diff")
+    with open(patch_path, "w", encoding="utf-8") as f:
+        f.write(patch_str)
+
+    return patch_str, list(files.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +153,7 @@ def write_test_with_retries(
     print_callback: Callable[[dict], None] | None = None,
 ) -> tuple[str, str | None, list[str], bool]:
     """
-    Call LLM to generate test patch, with retries on format extraction failure.
+    Call LLM to generate test files, with retries on format extraction failure.
     Returns (result_msg, patch_str, test_file_list, success).
     """
     new_thread = msg_thread
@@ -175,15 +189,19 @@ def write_test_with_retries(
 
         print_patch_generation(res_text, f"test gen try {i} / {retries}", print_callback=print_callback)
 
-        patch_content, test_files = extract_test_patch_from_response(res_text, output_dir)
-        can_stop = patch_content is not None and len(test_files) > 0
+        extracted_files = extract_test_files_from_response(res_text)
+        if extracted_files:
+            patch_content, test_files = build_patch_from_files(extracted_files, output_dir)
+            can_stop = True
+        else:
+            patch_content, test_files = None, []
 
         if can_stop:
-            result_msg = "Successfully generated test patch."
+            result_msg = "Successfully generated test files."
             print_acr(result_msg, f"test generation try {i}/{retries}", print_callback=print_callback)
             break
         else:
-            feedback = "Failed to extract a valid test patch from your response. Please return the test patch as a unified diff wrapped in <test_patch> tags, starting with 'diff --git'."
+            feedback = 'Failed to extract test files from your response. Please return each test file wrapped in <test_file path="relative/path/to/test.py"> tags containing the raw file content (no diff syntax).'
             new_thread.add_user(feedback)
             print_acr(feedback, f"Retry {i}/{retries}", print_callback=print_callback)
 
@@ -264,14 +282,14 @@ def refine_tests_with_reflexion(
         with open(pjoin(round_dir, "refinement_raw.txt"), "w") as f:
             f.write(refined_text)
 
-        refined_patch, refined_files = extract_test_patch_from_response(refined_text, round_dir)
-
-        if refined_patch and len(refined_files) > 0:
+        extracted_files = extract_test_files_from_response(refined_text)
+        if extracted_files:
+            refined_patch, refined_files = build_patch_from_files(extracted_files, round_dir)
             current_patch = refined_patch
             current_files = refined_files
             logger.info(f"Reflexion round {round_num}: refined to {len(refined_files)} file(s).")
         else:
-            logger.warning(f"Reflexion round {round_num}: failed to extract refined patch, keeping previous version.")
+            logger.warning(f"Reflexion round {round_num}: failed to extract refined files, keeping previous version.")
             break
 
     return current_patch, current_files

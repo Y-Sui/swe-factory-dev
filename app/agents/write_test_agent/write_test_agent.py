@@ -114,7 +114,6 @@ class WriteTestAgent(Agent):
                 max_rounds=self.max_reflexion_rounds,
                 print_callback=print_callback,
             )
-            # Update with refined results
             patch_str = refined_patch
             test_files = refined_files
 

@@ -16,6 +16,19 @@ set -a && source .env && set +a
 # Ensure the app package is importable
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
+# Step 0: Build base images (skipped if already present locally)
+echo "=== Building base images ==="
+if ! docker image inspect swe-factory/miroflow:base &>/dev/null; then
+  docker build -t swe-factory/miroflow:base -f docker/Dockerfile.miroflow .
+fi
+if ! docker image inspect swe-factory/mirothinker:base &>/dev/null; then
+  docker build -t swe-factory/mirothinker:base -f docker/Dockerfile.mirothinker .
+fi
+if ! docker image inspect swe-factory/sd-torchtune:base &>/dev/null; then
+  docker build --build-arg GITHUB_TOKEN="${GITHUB_TOKEN}" \
+    -t swe-factory/sd-torchtune:base -f docker/Dockerfile.sd-torchtune .
+fi
+
 SCRIPT_DIR="data_collection/collect"
 DATA_DIR="../internal-swe-bench-data"
 SETUP_DIR="testbed"

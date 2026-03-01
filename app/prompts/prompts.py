@@ -169,7 +169,9 @@ Important Notes:
 - Testing should be performed **after** the image is built (in CI pipeline or post-build validation step), not during image creation.
 - Embedding tests in the Dockerfile breaks caching and slows down builds.
 
-3. If you frequently encounter issues with the base image, consider using FROM ubuntu:xx.xx and manually installing dependencies (node,maven,java,python,etc.) to ensure a stable and reliable environment.
+3. If you frequently encounter issues with the base image in **full-build mode**, consider using `FROM ubuntu:xx.xx` and manually installing dependencies to ensure a stable environment. However, this does NOT apply in instance-layer mode — see note 4.
+
+4. **CRITICAL (instance-layer mode)**: If the current Dockerfile starts with `FROM swe-factory/...` or any other custom base image (not `python:*` or `ubuntu:*`), you are in instance-layer mode. You MUST keep that `FROM` line unchanged. Do NOT replace it with `python:*`, `ubuntu:*`, or any other image. Do NOT add `git clone` — the repo is already at `/testbed`.
 
 Return modified dockerfile in defined format. Wrap results in <dockerfile></dockerfile>.
 """
@@ -180,6 +182,13 @@ Return modified dockerfile in defined format. Wrap results in <dockerfile></dock
 # ===========================================================================
 
 DOCKERFILE_INSTANCE_LAYER_SYSTEM_PROMPT = """You are an Instance Dockerfile Agent. Your ONLY job is to generate a Dockerfile that layers on top of an existing base Docker image to prepare the environment for a specific commit of the codebase.
+
+## CRITICAL RULE
+
+**You MUST start with `FROM <base_image>` exactly as provided.**
+- Do NOT use `python:*`, `ubuntu:*`, or any other base image — only the specified base image.
+- Do NOT include `git clone` — the repository is already cloned at `/testbed`.
+- The first non-comment line of your Dockerfile MUST be `FROM <base_image>`.
 
 ## What the Base Image Already Contains
 
@@ -265,12 +274,15 @@ DOCKERFILE_INSTANCE_LAYER_USER_PROMPT = """Generate a minimal **instance-layer D
 
 Generate the Dockerfile now. Wrap it in `<dockerfile>` tags.
 
-Example structure:
+Example structure (follow this exactly — do NOT change the base image or add git clone):
 
 <dockerfile>
+# REQUIRED: inherit from the pre-built base image — do NOT change this line
 FROM {base_image}
 
 WORKDIR /testbed
+
+# DO NOT git clone — repo already exists at /testbed
 
 # 1. Checkout to the target commit (bug still present)
 RUN cd /testbed && git checkout {base_commit} && git clean -fd
@@ -348,10 +360,12 @@ REPO_ENV_TEMPLATES: dict[str, str] = {
   `uv sync` creates and manages its own `.venv` automatically at the WORKDIR.
   If you also run `python3 -m venv venv`, you get TWO separate venvs and pytest
   ends up in `.venv` while PATH points to `venv` — pytest will not be found.
-  Correct Dockerfile pattern:
+  Correct instance-layer pattern (repo already at /testbed — do NOT git clone):
   ```dockerfile
+  FROM swe-factory/miroflow:base
   WORKDIR /testbed
-  RUN git clone https://github.com/MiroMindAI/miroflow . && git reset --hard <commit>
+  # DO NOT git clone — repo already exists at /testbed
+  RUN cd /testbed && git checkout <commit> && git clean -fd
   COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
   RUN uv sync                              # creates /testbed/.venv automatically
   RUN uv pip install pytest pytest-asyncio # installs into /testbed/.venv
@@ -361,19 +375,6 @@ REPO_ENV_TEMPLATES: dict[str, str] = {
 - Test runner: pytest (no existing tests — LLM-generated tests will be placed in /testbed/tests/)
 - Key deps: anthropic, openai, mcp, fastmcp, hydra-core, rich, fire, google-genai
 - Entry point: main.py
-- CRITICAL — base image: use `python:3.12-slim` instead of ubuntu+deadsnakes PPA.
-  The deadsnakes PPA requires GPG agent setup that frequently fails in Docker builds.
-  `python:3.12-slim` already has Python 3.12 — no PPA needed:
-  ```dockerfile
-  FROM python:3.12-slim
-  RUN apt update && apt install -y git curl build-essential && rm -rf /var/lib/apt/lists/*
-  COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-  WORKDIR /testbed
-  RUN git clone https://github.com/MiroMindAI/miroflow . && git reset --hard <commit>
-  RUN uv sync
-  RUN uv pip install pytest pytest-asyncio
-  ENV PATH="/testbed/.venv/bin:$PATH"
-  ```
 """,
 
     "MiroMindAI/MiroThinker": """### Repo Environment: MiroMindAI/MiroThinker
@@ -397,11 +398,13 @@ REPO_ENV_TEMPLATES: dict[str, str] = {
   venv lands at `/testbed/apps/miroflow-agent/.venv`.
   Do NOT run `uv venv` or `uv sync` from `/testbed` — the venv will be at the
   wrong location and eval.sh will fail to activate it.
-  Correct Dockerfile pattern (order matters):
+  Correct instance-layer pattern (repo already at /testbed — do NOT git clone):
   ```dockerfile
+  FROM swe-factory/mirothinker:base
   COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
   WORKDIR /testbed
-  RUN git clone https://github.com/MiroMindAI/MiroThinker . && git reset --hard <commit>
+  # DO NOT git clone — repo already exists at /testbed
+  RUN cd /testbed && git checkout <commit> && git clean -fd
   # Install libs/miroflow-tools first using --system (no venv yet)
   RUN uv pip install --system -e libs/miroflow-tools
   # Now switch to the main app directory and create venv + sync there
@@ -418,23 +421,7 @@ REPO_ENV_TEMPLATES: dict[str, str] = {
   - Import paths in tests are relative to `apps/miroflow-agent/` — e.g. patch file `apps/miroflow-agent/src/core/foo.py` → `from src.core.foo import Foo`
 - Test deps: pytest, pytest-asyncio, pytest-cov, pytest-xdist, pytest-mock
 - Key deps: anthropic, openai, mcp, fastmcp, e2b-code-interpreter, hydra-core, transformers
-- CRITICAL — base image: use `python:3.12-slim` instead of ubuntu+deadsnakes PPA.
-  The deadsnakes PPA requires GPG agent setup that frequently fails in Docker builds.
-  `python:3.12-slim` already has Python 3.12 — no PPA needed:
-  ```dockerfile
-  FROM python:3.12-slim
-  RUN apt update && apt install -y git curl build-essential && rm -rf /var/lib/apt/lists/*
-  COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-  WORKDIR /testbed
-  RUN git clone https://github.com/MiroMindAI/MiroThinker . && git reset --hard <commit>
-  RUN uv pip install --system -e libs/miroflow-tools
-  WORKDIR /testbed/apps/miroflow-agent
-  RUN uv venv
-  RUN uv sync
-  RUN uv pip install pytest pytest-asyncio pytest-cov pytest-mock
-  ENV PATH="/testbed/apps/miroflow-agent/.venv/bin:$PATH"
-  ```
-  eval.sh pattern:
+- eval.sh pattern:
   ```bash
   cd /testbed/apps/miroflow-agent
   source /testbed/apps/miroflow-agent/.venv/bin/activate
@@ -453,17 +440,6 @@ REPO_ENV_TEMPLATES: dict[str, str] = {
   will fail during `pip install -e ".[dev]"` with "No matching distribution found".
 - Build system: setuptools (`pyproject.toml`, `[build-system] requires = ["setuptools", "wheel"]`)
 - Package manager: pip
-- Correct Dockerfile base + install sequence:
-  ```dockerfile
-  FROM python:3.11-slim
-  RUN apt update && apt install -y git curl build-essential && rm -rf /var/lib/apt/lists/*
-  WORKDIR /testbed
-  RUN git clone https://<token>@github.com/MiroMindAI/sd-torchtune . && git reset --hard <commit>
-  RUN pip install --upgrade pip
-  RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-  RUN pip install -e ".[dev]"
-  RUN pip install torchao
-  ```
 - CRITICAL — flash_attn cannot be installed in CPU-only Docker:
   `torchtune/modules/attention.py` imports `flash_attn` unconditionally at the top level,
   which causes ALL pytest collection to fail with ModuleNotFoundError even for unrelated tests.
@@ -485,7 +461,6 @@ REPO_ENV_TEMPLATES: dict[str, str] = {
 - CLI entry: `tune` command (`torchtune._cli.tune:main`)
 - Key deps: torchdata, liger-kernel, datasets, huggingface_hub, safetensors, sentencepiece, tiktoken
 - Private repo: requires GITHUB_TOKEN (already handled by token injection)
-- Recommended base: python:3.11-slim (avoid ubuntu+deadsnakes PPA; avoid CUDA image unless GPU test needed)
 """,
 }
 
@@ -654,27 +629,28 @@ def get_eval_script_user_prompt_init(eval_script_skeleton: str, with_downloads: 
 # 5. WRITE TEST AGENT
 # ===========================================================================
 
-_TEST_SHARED_DIFF_FORMAT = """
+_TEST_SHARED_FILE_FORMAT = """
 ### Output Format:
-Return your generated tests as a unified diff that creates new test files. Wrap the diff in `<test_patch>` tags.
+Return each test file as its **complete raw content** wrapped in `<test_file path="...">` tags.
+Use the `path` attribute to specify where the file should be placed relative to the repo root (e.g. `tests/test_my_fix.py`).
 Use comments in the test files to clearly mark F2P vs P2P tests, e.g.:
   # --- F2P: tests that should fail before patch, pass after ---
   # --- P2P: regression tests that should always pass ---
 
-The diff must use this EXACT format for new files (copy this pattern precisely):
+Example format (one tag per file):
 ```
-diff --git a/tests/test_my_fix.py b/tests/test_my_fix.py
---- /dev/null
-+++ b/tests/test_my_fix.py
-@@ -0,0 +1,N @@
-+<line 1>
-+<line 2>
-...
+<test_file path="tests/test_my_fix.py">
+import pytest
+from mymodule import my_function
+
+def test_f2p_returns_correct_value():
+    result = my_function(42)
+    assert result == expected_value
+</test_file>
 ```
-IMPORTANT: The `---` line MUST be `--- /dev/null` (absolute path with leading slash).
-Do NOT write `--- a/dev/null` (relative path) — that causes `git apply` to fail with
-"error: dev/null: No such file or directory".
-The `diff --git` header line uses `a/<path> b/<path>` (same path on both sides).
+
+You may emit multiple `<test_file ...>` blocks if you want to create more than one file.
+Do NOT wrap the content in diff syntax — write plain source code only.
 """
 
 TEST_SYSTEM_PROMPT_PYTHON = """You are a Test Agent for SWE-bench instance construction. Your ONLY job is to write test files that validate whether a bug fix has been correctly applied.
@@ -734,28 +710,24 @@ You will receive:
 - **No over-mocking**: Do NOT mock the function or class that the patch is fixing. The F2P test must call the real implementation. Only mock external dependencies (network, file I/O, third-party APIs).
 - **Monorepo import paths**: Python imports are resolved relative to where pytest runs, NOT the repo root. Strip monorepo prefixes (e.g. `apps/miroflow-agent/src/core/foo.py` → `from src.core.foo import Foo`). Directory names with hyphens cannot be used in import paths.
 - **All tests must be directly relevant** to the patch — do NOT generate tests targeting unrelated functions or modules not mentioned in the patch.
-""" + _TEST_SHARED_DIFF_FORMAT + """
+""" + _TEST_SHARED_FILE_FORMAT + """
 Example:
-<test_patch>
-diff --git a/tests/test_fix_issue.py b/tests/test_fix_issue.py
---- /dev/null
-+++ b/tests/test_fix_issue.py
-@@ -0,0 +1,20 @@
-+import pytest
-+from mymodule import my_function
-+
-+# --- F2P: tests that should fail before patch, pass after ---
-+def test_f2p_returns_correct_value():
-+    \"\"\"Bug: my_function returns X instead of Y for input 42.\"\"\"
-+    result = my_function(42)
-+    assert result == expected_value, f"Expected {expected_value}, got {result}"
-+
-+# --- P2P: regression tests that should always pass ---
-+def test_p2p_handles_edge_case():
-+    \"\"\"Verifies my_function still handles zero input correctly.\"\"\"
-+    result = my_function(0)
-+    assert result is not None
-</test_patch>
+<test_file path="tests/test_fix_issue.py">
+import pytest
+from mymodule import my_function
+
+# --- F2P: tests that should fail before patch, pass after ---
+def test_f2p_returns_correct_value():
+    \"\"\"Bug: my_function returns X instead of Y for input 42.\"\"\"
+    result = my_function(42)
+    assert result == expected_value, f"Expected {expected_value}, got {result}"
+
+# --- P2P: regression tests that should always pass ---
+def test_p2p_handles_edge_case():
+    \"\"\"Verifies my_function still handles zero input correctly.\"\"\"
+    result = my_function(0)
+    assert result is not None
+</test_file>
 """
 
 TEST_SYSTEM_PROMPT_JAVASCRIPT = """You are a Test Agent for SWE-bench instance construction. Your ONLY job is to write JavaScript test files (using Jest or Mocha) that validate whether a bug fix has been correctly applied.
@@ -773,29 +745,25 @@ Generate **two categories** of tests:
 - **P2P tests** (prefix `test_p2p_` or describe block "P2P"): PASS both before and after.
 
 Do NOT mock the function the patch fixes. Test observable behavior, not implementation details.
-""" + _TEST_SHARED_DIFF_FORMAT + """
+""" + _TEST_SHARED_FILE_FORMAT + """
 Example:
-<test_patch>
-diff --git a/tests/fix_issue.test.js b/tests/fix_issue.test.js
---- /dev/null
-+++ b/tests/fix_issue.test.js
-@@ -0,0 +1,20 @@
-+const { myFunction } = require('../src/myModule');
-+
-+// --- F2P: tests that should fail before patch, pass after ---
-+describe('myFunction fix', () => {
-+  test('test_f2p_returns correct value after fix', () => {
-+    expect(myFunction(42)).toBe(expectedValue);
-+  });
-+});
-+
-+// --- P2P: regression tests that should always pass ---
-+describe('myFunction regression', () => {
-+  test('test_p2p_handles edge case', () => {
-+    expect(myFunction(0)).not.toBeNull();
-+  });
-+});
-</test_patch>
+<test_file path="tests/fix_issue.test.js">
+const { myFunction } = require('../src/myModule');
+
+// --- F2P: tests that should fail before patch, pass after ---
+describe('myFunction fix', () => {
+  test('test_f2p_returns correct value after fix', () => {
+    expect(myFunction(42)).toBe(expectedValue);
+  });
+});
+
+// --- P2P: regression tests that should always pass ---
+describe('myFunction regression', () => {
+  test('test_p2p_handles edge case', () => {
+    expect(myFunction(0)).not.toBeNull();
+  });
+});
+</test_file>
 """
 
 TEST_SYSTEM_PROMPT_JAVA = """You are a Test Agent for SWE-bench instance construction. Your ONLY job is to write Java JUnit test files that validate whether a bug fix has been correctly applied.
@@ -813,32 +781,28 @@ Generate **two categories** of tests:
 - **P2P tests** (method names prefixed `testP2p`): PASS both before and after.
 
 Do NOT mock the method the patch fixes. Test observable behavior.
-""" + _TEST_SHARED_DIFF_FORMAT + """
+""" + _TEST_SHARED_FILE_FORMAT + """
 Example:
-<test_patch>
-diff --git a/src/test/java/com/example/FixIssueTest.java b/src/test/java/com/example/FixIssueTest.java
---- /dev/null
-+++ b/src/test/java/com/example/FixIssueTest.java
-@@ -0,0 +1,22 @@
-+package com.example;
-+
-+import org.junit.jupiter.api.Test;
-+import static org.junit.jupiter.api.Assertions.*;
-+
-+class FixIssueTest {
-+    // --- F2P: tests that should fail before patch, pass after ---
-+    @Test
-+    void testF2pReturnsCorrectValue() {
-+        assertEquals(expectedValue, MyClass.myMethod(42));
-+    }
-+
-+    // --- P2P: regression tests that should always pass ---
-+    @Test
-+    void testP2pHandlesEdgeCase() {
-+        assertNotNull(MyClass.myMethod(0));
-+    }
-+}
-</test_patch>
+<test_file path="src/test/java/com/example/FixIssueTest.java">
+package com.example;
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+class FixIssueTest {
+    // --- F2P: tests that should fail before patch, pass after ---
+    @Test
+    void testF2pReturnsCorrectValue() {
+        assertEquals(expectedValue, MyClass.myMethod(42));
+    }
+
+    // --- P2P: regression tests that should always pass ---
+    @Test
+    void testP2pHandlesEdgeCase() {
+        assertNotNull(MyClass.myMethod(0));
+    }
+}
+</test_file>
 """
 
 TEST_SYSTEM_PROMPT_TYPESCRIPT = """You are a Test Agent for SWE-bench instance construction. Your ONLY job is to write TypeScript test files (using Jest or Vitest) that validate whether a bug fix has been correctly applied.
@@ -856,29 +820,25 @@ Generate **two categories** of tests:
 - **P2P tests**: PASS both before and after.
 
 Do NOT mock the function the patch fixes. Test observable behavior.
-""" + _TEST_SHARED_DIFF_FORMAT + """
+""" + _TEST_SHARED_FILE_FORMAT + """
 Example:
-<test_patch>
-diff --git a/tests/fix_issue.test.ts b/tests/fix_issue.test.ts
---- /dev/null
-+++ b/tests/fix_issue.test.ts
-@@ -0,0 +1,20 @@
-+import { myFunction } from '../src/myModule';
-+
-+// --- F2P: tests that should fail before patch, pass after ---
-+describe('myFunction fix', () => {
-+  it('test_f2p_returns correct value after fix', () => {
-+    expect(myFunction(42)).toBe(expectedValue);
-+  });
-+});
-+
-+// --- P2P: regression tests that should always pass ---
-+describe('myFunction regression', () => {
-+  it('test_p2p_handles edge case', () => {
-+    expect(myFunction(0)).not.toBeNull();
-+  });
-+});
-</test_patch>
+<test_file path="tests/fix_issue.test.ts">
+import { myFunction } from '../src/myModule';
+
+// --- F2P: tests that should fail before patch, pass after ---
+describe('myFunction fix', () => {
+  it('test_f2p_returns correct value after fix', () => {
+    expect(myFunction(42)).toBe(expectedValue);
+  });
+});
+
+// --- P2P: regression tests that should always pass ---
+describe('myFunction regression', () => {
+  it('test_p2p_handles edge case', () => {
+    expect(myFunction(0)).not.toBeNull();
+  });
+});
+</test_file>
 """
 
 
@@ -924,7 +884,7 @@ TEST_USER_PROMPT = """Generate test files for the following pull request.
 
 ---
 
-Based on the above, generate test file(s) as a unified diff wrapped in `<test_patch>` tags.
+Based on the above, generate test file(s) using `<test_file path="...">` tags (plain file content, no diff syntax).
 
 **You MUST generate two categories of tests:**
 1. **F2P (Fail-to-Pass)**: Tests that FAIL on `base_commit` (bug present) and PASS after the patch. Prefix with `test_f2p_`.
@@ -958,8 +918,6 @@ TEST_REFLEXION_CRITIQUE_PROMPT = """You are reviewing auto-generated test files 
 5. **Over-mocking**: Do the F2P tests mock the very function or class being patched? If so, the test is broken — it will pass regardless of the actual code. F2P tests must call the real implementation of the patched code.
 6. **Determinism**: Are tests free of randomness, timing dependencies, or external service calls?
 7. **Edge cases**: Are important edge cases covered?
-8. **Diff format**: For new test files, does the `---` header line say `--- /dev/null` (correct) or `--- a/dev/null` (wrong)? The wrong form causes `git apply` to fail with "No such file or directory". Flag any incorrect headers.
-
 Provide your critique as structured text. If the tests are high-quality and no changes are needed, explicitly say "TESTS_APPROVED".
 """
 
@@ -977,12 +935,11 @@ TEST_REFLEXION_REFINE_PROMPT = """Based on the following critique of the generat
 ### Gold Patch:
 {patch_content}
 
-Generate improved test files as a unified diff wrapped in `<test_patch>` tags. Address every issue raised in the critique. Ensure:
+Generate improved test files using `<test_file path="...">` tags (plain file content, no diff syntax). Address every issue raised in the critique. Ensure:
 - F2P tests truly fail before the patch and pass after
 - P2P tests truly pass both before and after
 - All tests are relevant to the PR
 - Import paths are correct
-- New test files use correct diff headers: `diff --git a/<path> b/<path>` then `--- /dev/null` (NOT `--- a/dev/null`)
 """
 
 

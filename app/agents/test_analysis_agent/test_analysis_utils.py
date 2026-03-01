@@ -16,6 +16,8 @@ SYSTEM_PROMPT = """You are an expert in analyzing and validating evaluation envi
 Background: To run the target test files of a given repository, we create a Dockerfile and an eval script. The eval script is invoked inside the container built by that Dockerfile.
 Important: The WriteTestAgent may generate new test files whose parent directories may not exist in the original repo. Do NOT treat missing test directories as a blocking error. Instead, ensure the eval script creates directories (e.g., `mkdir -p`) before applying the test patch, and only flag issues if the patch fails to apply or tests fail.
 
+CRITICAL — Instance-layer Dockerfiles: If the Dockerfile starts with `FROM swe-factory/...`, it is an instance-layer Dockerfile that MUST inherit from that pre-built base image. Do NOT instruct the WriteDockerfileAgent to change the base image to `python:*`, `ubuntu:*`, or any other public image. If the build fails with "pull access denied" for a `swe-factory/...` image, the base image simply needs to be built locally first — this is an infrastructure issue, not a Dockerfile error. In that case, set `guidance_for_write_dockerfile_agent` to empty and do not suggest changing the base image.
+
 If Docker test execution results are available, you will also receive:
 - Post-patch test log (with gold patch applied)
 - Pre-patch test log (without gold patch)
