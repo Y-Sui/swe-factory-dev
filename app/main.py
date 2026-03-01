@@ -112,8 +112,6 @@ def main(args, subparser_dest_attr_name: str = "command"):
     globals.results_path = args.results_path 
     globals.disable_memory_pool = args.disable_memory_pool
     globals.disable_run_test = args.disable_run_test
-    
-    globals.disable_context_retrieval= args.disable_context_retrieval
 
     globals.disable_download_test_resources= args.disable_download_test_resources
 
@@ -352,12 +350,6 @@ def add_task_related_args(parser: ArgumentParser) -> None:
     )
     parser.add_argument(
         "--disable-run-test",
-        action="store_true",
-        default=False,
-        help="Enable layered code search.",
-    )
-    parser.add_argument(
-        "--disable-context-retrieval",
         action="store_true",
         default=False,
         help="Enable layered code search.",
@@ -731,7 +723,15 @@ def do_inference(
     task_output_dir: str,
     print_callback: Callable[[dict], None] | None = None,
 ) -> bool:
-    client = None if globals.disable_run_test else docker.from_env()
+    if globals.disable_run_test:
+        client = None
+    else:
+        try:
+            client = docker.from_env()
+        except Exception as e:
+            logger.warning(f"Docker is not available: {e}. Skipping test execution.")
+            client = None
+            globals.disable_run_test = True
     apputils.create_dir_if_not_exists(task_output_dir)
     # github_link = f'https://github.com/{python_task.repo_name}.git'
     commit_hash = python_task.commit
@@ -749,14 +749,13 @@ def do_inference(
 
     
     try:
-        agents_manager = AgentsManager(python_task, 
+        agents_manager = AgentsManager(python_task,
                                         task_output_dir,
                                         client,
                                         start_time,
                                         globals.conv_round_limit,
                                         globals.results_path,
                                         disable_memory_pool = globals.disable_memory_pool,
-                                        disable_context_retrieval= globals.disable_context_retrieval,
                                         disable_run_test= globals.disable_run_test,
                                         disable_download_test_resources = globals.disable_download_test_resources,
                                         using_ubuntu_only = globals.using_ubuntu_only,

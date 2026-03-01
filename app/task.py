@@ -15,6 +15,8 @@ from app.log import log_and_print
 from docker import DockerClient
 
 class Task(ABC):
+    task_id: str
+
     @property
     @abstractmethod
     def project_path(self) -> str:

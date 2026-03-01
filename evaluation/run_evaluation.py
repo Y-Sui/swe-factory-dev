@@ -861,7 +861,11 @@ def main(
     # set open file limit
     assert len(run_id) > 0, "Run ID must be provided"
     resource.setrlimit(resource.RLIMIT_NOFILE, (open_file_limit, open_file_limit))
-    client = docker.from_env()
+    try:
+        client = docker.from_env()
+    except Exception as e:
+        print(f"Docker is not available: {e}. Skipping evaluation.")
+        return
 
 
 

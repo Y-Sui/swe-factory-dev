@@ -51,7 +51,6 @@ class TestAnalysisAgent(Agent):
         self.dockerfile = None
         self.eval_script = None
         self.timeout = 3600
-        self.disable_context_retrieval = False
         self.disable_run_test = False
         # self.init_msg_thread()
 
@@ -66,12 +65,7 @@ class TestAnalysisAgent(Agent):
         # if getattr(agent_analyze_test_log, "SYSTEM_PROMPT_WIT_WEB_SEARCH", None) and getattr(self.task, 'enable_web_search', False):
         #     self.msg_thread.add_system(test_analysis_utils.SYSTEM_PROMPT_WIT_WEB_SEARCH)
         # else:
-        if self.disable_context_retrieval:
-            self.add_system_message(test_analysis_utils.SYSTEM_PROMPT_WITHOUT_CONTEXT_RETRIEVAL)
-        elif self.disable_run_test:
-            self.add_system_message(test_analysis_utils.SYSTEM_PROMPT_WITHOUT_RUN_TEST)
-        else:
-            self.add_system_message(test_analysis_utils.SYSTEM_PROMPT)
+        self.add_system_message(test_analysis_utils.SYSTEM_PROMPT)
         # Inject repository basic information
         self.add_user_message(self.repo_basic_info)
         self.add_user_message(f'The current dockerfile used to setup environemnt:\n{self.dockerfile}')
@@ -119,7 +113,7 @@ class TestAnalysisAgent(Agent):
         
         return f'Test log (showing first {head_size} & last {tail_size} lines):\n{truncated_log}\n\n'
 
-    def run_task(self, disable_context_retrieval= False, print_callback=None) -> tuple[str, str, bool]:
+    def run_task(self, print_callback=None) -> tuple[str, str, bool]:
         """
         2. Read and format the test log
         3. Add formatted log to the message thread
@@ -168,7 +162,7 @@ class TestAnalysisAgent(Agent):
             )
             
         success =False
-        analysis = test_analysis_utils.run_with_retries(self.msg_thread,disable_context_retrieval=disable_context_retrieval,print_callback=print_callback)
+        analysis = test_analysis_utils.run_with_retries(self.msg_thread, print_callback=print_callback)
         task_output = analysis
         analysis_file = Path(f"{self.get_latest_test_analysis_output_dir()}/analysis.json")
 
@@ -227,7 +221,7 @@ class TestAnalysisAgent(Agent):
             )
             
         success =False
-        analysis = test_analysis_utils.run_with_retries(self.msg_thread,disable_run_test=True,print_callback=print_callback)
+        analysis = test_analysis_utils.run_with_retries(self.msg_thread, print_callback=print_callback)
         task_output = analysis
         analysis_file = Path(f"{self.get_latest_test_analysis_output_dir()}/analysis.json")
 

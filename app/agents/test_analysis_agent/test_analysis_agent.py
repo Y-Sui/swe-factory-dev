@@ -58,9 +58,10 @@ class TestAnalysisAgent(Agent):
         self.dockerfile = None
         self.eval_script = None
         self.timeout = 3600
-        self.disable_context_retrieval = False
         self.disable_run_test = False
         self.f2p_classification = None
+        self._cached_image_name = None   # image tag of last successfully built image
+        self._cached_dockerfile = None   # dockerfile content used for that build
         # self.init_msg_thread()
 
 
@@ -70,16 +71,7 @@ class TestAnalysisAgent(Agent):
         Reset the message thread and inject the base prompt before each run_task.
         """
         self.msg_thread = MessageThread()
-        # Choose the appropriate system prompt
-        # if getattr(agent_analyze_test_log, "SYSTEM_PROMPT_WIT_WEB_SEARCH", None) and getattr(self.task, 'enable_web_search', False):
-        #     self.msg_thread.add_system(test_analysis_utils.SYSTEM_PROMPT_WIT_WEB_SEARCH)
-        # else:
-        if self.disable_context_retrieval:
-            self.add_system_message(test_analysis_utils.SYSTEM_PROMPT_WITHOUT_CONTEXT_RETRIEVAL)
-        elif self.disable_run_test:
-            self.add_system_message(test_analysis_utils.SYSTEM_PROMPT_WITHOUT_RUN_TEST)
-        else:
-            self.add_system_message(test_analysis_utils.SYSTEM_PROMPT)
+        self.add_system_message(test_analysis_utils.SYSTEM_PROMPT)
         # Inject repository basic information
         self.add_user_message(self.repo_basic_info)
         self.add_user_message(f'The current dockerfile used to setup environemnt:\n{self.dockerfile}')
@@ -157,171 +149,82 @@ class TestAnalysisAgent(Agent):
         truncated_log = "\n".join(head + [omission] + tail)
         return f'Pre-patch test log (showing first {head_size} & last {tail_size} lines):\n{truncated_log}\n\n'
 
-    def run_task(self, disable_context_retrieval= False, print_callback=None) -> tuple[str, str, bool]:
-        """
-        2. Read and format the test log
-        3. Add formatted log to the message thread
-        4. Invoke agent_analyze_test_log.run_with_retries(...)
-        5. Return (tool_output, summary, ok)
-        """
-        if self.disable_run_test:
-            raise RuntimeError(
-                "disable_run_test is True; refusing to build docker or run tests. "
-                "Call run_task_without_run_test instead."
-            )
+    def run_task(self, print_callback=None) -> tuple[str, str, bool]:
         self.init_msg_thread()
-        print_banner(f"Task {self.task.task_id} Iteration ROUND {self.iteration_num} Try to setup docker and run tests ")
-        
+        print_banner(f"Task {self.task.task_id} Iteration ROUND {self.iteration_num} "
+                     f"Analyzing evaluation environment")
+
         self.analysis_count += 1
         test_log_output_dir = self.get_latest_test_analysis_output_dir()
-        os.makedirs(test_log_output_dir,exist_ok=True)
-        intent = FunctionCallIntent("setup_docker_and_run_test", {}, None)
-        tool_output, _, success = self.dispatch_intent(intent)
-        build_image_status = False
-        if 'Image built successfully!' not in tool_output:
-            # fail to build image. go to dockefile refine.
-            print_acr(
-                'Build Image Failure!',
-                f"Task {self.task.task_id} Iteration ROUND {self.iteration_num}  test analysis",
-                print_callback=print_callback,
-            )
-            error_in_building_dockerfile = f'We can not run tests successfully, cause we encounter some errors when building dockerfile. As follows:\n{tool_output}\n\n'
-            self.add_user_message(error_in_building_dockerfile)
-        elif success:
-            build_image_status  = True
-            print_acr(
-                'Build Image Successfully!',
-                f"Task {self.task.task_id} Iteration ROUND {self.iteration_num}  test analysis ",
-                print_callback=print_callback,
-            )
-            test_log = self.get_test_log_with_line_numbers()
-            # self.add_user_message(f'Eval script (We omit details of test patch):\n{self.eval_script_skeleton}\n\n')
-            self.add_user_message(test_log)
-            # Add pre-patch test log and F2P classification
-            prev_test_log = self.get_prev_test_log_with_line_numbers()
-            if prev_test_log:
-                self.add_user_message(prev_test_log)
-            if self.f2p_classification:
-                f2p_msg = (
-                    f"F2P Validation Result: {self.f2p_classification}\n"
-                    "- FAIL2PASS: Tests fail without gold patch and pass with it. This is the desired outcome.\n"
-                    "- PASS2PASS: Tests pass both without and with the gold patch. The tests are too weak and do not capture the bug.\n"
-                    "- FAIL2FAIL: Tests fail both without and with the gold patch. There is likely an environment or test setup issue.\n"
-                    "- PASS2FAIL: Tests pass without but fail with the gold patch. The tests are broken or inverted.\n"
-                    "- ERROR: Could not determine exit codes from one or both test runs.\n"
-                )
-                self.add_user_message(f2p_msg)
-        else:
-            logger.error(tool_output)
-            logger.error('some problem in running tests')
-            return None, f'{self.agent_id} fails, some error happens', False
-        # if we judge that we achieve the goal, terminate the process
-        # if test log show that it fails, we go to plan for futrure directions
-        # judge whether achieve the goal, if not planning for the work in the next stage.
-        print_acr(
-                f'Task {self.task.task_id} Iteration ROUND {self.iteration_num}  Try to analyze the test log ',
-                f"Task {self.task.task_id} Iteration ROUND {self.iteration_num}  test analysis round ",
-                print_callback=print_callback,
-            )
-            
-        success =False
-        analysis = test_analysis_utils.run_with_retries(self.msg_thread,disable_context_retrieval=disable_context_retrieval,print_callback=print_callback)
-        task_output = analysis
-        analysis_file = Path(f"{self.get_latest_test_analysis_output_dir()}/analysis.json")
+        os.makedirs(test_log_output_dir, exist_ok=True)
 
+        build_image_status = False
+
+        # --- Optional: Docker build + test execution ---
+        if not self.disable_run_test:
+            intent = FunctionCallIntent("setup_docker_and_run_test", {}, None)
+            tool_output, _, docker_success = self.dispatch_intent(intent)
+
+            if 'Image built successfully!' not in tool_output:
+                print_acr('Build Image Failure!',
+                          f"Task {self.task.task_id} Iteration ROUND {self.iteration_num}",
+                          print_callback=print_callback)
+                self.add_user_message(
+                    f'Docker image build failed with these errors:\n{tool_output}\n\n')
+            elif docker_success:
+                build_image_status = True
+                print_acr('Build Image Successfully!',
+                          f"Task {self.task.task_id} Iteration ROUND {self.iteration_num}",
+                          print_callback=print_callback)
+                self.add_user_message(self.get_test_log_with_line_numbers())
+                prev_log = self.get_prev_test_log_with_line_numbers()
+                if prev_log:
+                    self.add_user_message(prev_log)
+                if self.f2p_classification:
+                    self.add_user_message(
+                        f"F2P Validation Result: {self.f2p_classification}\n"
+                        "- FAIL2PASS: Tests fail without gold patch and pass with it. Desired outcome.\n"
+                        "- PASS2PASS: Tests pass both times. Tests are too weak.\n"
+                        "- FAIL2FAIL: Tests fail both times. Environment/setup issue.\n"
+                        "- PASS2FAIL: Tests pass without but fail with patch. Tests broken/inverted.\n"
+                        "- ERROR: Could not determine exit codes.\n")
+            else:
+                logger.error(tool_output)
+                return None, f'{self.agent_id} fails, Docker error', False
+
+        # --- LLM analysis ---
+        print_acr(f'Task {self.task.task_id} Iteration ROUND {self.iteration_num} Analyzing',
+                  f"Task {self.task.task_id} Iteration ROUND {self.iteration_num} analysis",
+                  print_callback=print_callback)
+
+        analysis = test_analysis_utils.run_with_retries(
+            self.msg_thread, print_callback=print_callback)
+        task_output = analysis
+
+        # --- Save ---
+        analysis_file = Path(f"{test_log_output_dir}/analysis.json")
         to_save = {}
         if isinstance(analysis, dict):
             to_save = analysis
         elif isinstance(analysis, str):
             try:
                 to_save = json.loads(analysis)
-            except Exception as e:
+            except Exception:
                 to_save = {}
-        else:
-            # analysis is neither dict nor str
-            to_save = {}
 
         to_save['build_image_status'] = build_image_status
         if self.f2p_classification:
             to_save['f2p_classification'] = self.f2p_classification
 
-        if task_output is None:
-            summary = "The tool returned nothing. The main agent probably did not provide enough clues."
-            success = False
-          
-            
-        else:
-            summary = "The tool returned the selected search APIs in json format generated by another agent."
-            success = True
-           
-            
+        success = task_output is not None
+        summary = ("Analysis completed." if success
+                   else "Analysis returned nothing.")
+
         with analysis_file.open("w", encoding="utf-8") as f:
             json.dump(to_save, f, ensure_ascii=False, indent=2)
-        
-        #need to save analysis into json file
-        conversation_file = pjoin(test_log_output_dir, f"conversation.json")
-        self.msg_thread.save_to_file(conversation_file)
-        
-        return task_output, summary, success 
+        self.msg_thread.save_to_file(pjoin(test_log_output_dir, "conversation.json"))
 
-    
-    def run_task_without_run_test(self, print_callback=None) -> tuple[str, str, bool]:
-        """
-        This function is just for ablation study
-        """
-        self.init_msg_thread()
-        print_banner(f"Task {self.task.task_id} Iteration ROUND {self.iteration_num} Try to setup docker and run tests ")
-        
-        self.analysis_count += 1
-        test_log_output_dir = self.get_latest_test_analysis_output_dir()
-        os.makedirs(test_log_output_dir,exist_ok=True)
-       
-        # if we judge that we achieve the goal, terminate the process
-        # if test log show that it fails, we go to plan for futrure directions
-        # judge whether achieve the goal, if not planning for the work in the next stage.
-        print_acr(
-                f'Task {self.task.task_id} Iteration ROUND {self.iteration_num}  Try to analyze the test log ',
-                f"Task {self.task.task_id} Iteration ROUND {self.iteration_num}  test analysis round ",
-                print_callback=print_callback,
-            )
-            
-        success =False
-        analysis = test_analysis_utils.run_with_retries(self.msg_thread,disable_run_test=True,print_callback=print_callback)
-        task_output = analysis
-        analysis_file = Path(f"{self.get_latest_test_analysis_output_dir()}/analysis.json")
-
-        to_save = {}
-        if isinstance(analysis, dict):
-            to_save = analysis
-        elif isinstance(analysis, str):
-            try:
-                to_save = json.loads(analysis)
-            except Exception as e:
-                to_save = {}
-        else:
-            # analysis is neither dict nor str
-            to_save = {}
-
-        # to_save['build_image_status'] = build_image_status
-
-        if task_output is None:
-            summary = "The tool returned nothing. The main agent probably did not provide enough clues."
-            success = False
-          
-            
-        else:
-            summary = "The tool returned the selected search APIs in json format generated by another agent."
-            success = True
-           
-            
-        with analysis_file.open("w", encoding="utf-8") as f:
-            json.dump(to_save, f, ensure_ascii=False, indent=2)
-        
-        #need to save analysis into json file
-        conversation_file = pjoin(test_log_output_dir, f"conversation.json")
-        self.msg_thread.save_to_file(conversation_file)
-        
-        return task_output, summary, success 
+        return task_output, summary, success
        
 
     def build_docker_image(
@@ -334,12 +237,6 @@ class TestAnalysisAgent(Agent):
         client
     ):
         """Build Docker image with detailed logging and error handling."""
-        if self.disable_run_test:
-            raise RuntimeError(
-                "disable_run_test is True; refusing to build docker image."
-            )
-    
-        
         build_image_logger.info(
             f"Building image {task_id}\n"
             f"Using dockerfile:\n{dockerfile}\n"
@@ -348,16 +245,16 @@ class TestAnalysisAgent(Agent):
     
 
         if self.setup_dockerfile_num > 1:
-            # prev_image_name = f"{task_id}:latest_{setup_dockerfile_num - 1}"
             prev_image_name = f"{self.task_id}-dockerfile{self.setup_dockerfile_num-1}:latest"
-            try:
-                client.images.remove(prev_image_name, force=True)
-                build_image_logger.info(f"Deleted previous image: {prev_image_name}")
-
-            except docker.errors.ImageNotFound:
-                build_image_logger.info(f"Do not find previous image, images list is clean.")
-            except Exception as e: 
-                build_image_logger.error(f"Failed to delete previous image {prev_image_name}: {str(e)}")
+            # Don't delete the cached image — it may be reused in future rounds
+            if prev_image_name != self._cached_image_name:
+                try:
+                    client.images.remove(prev_image_name, force=True)
+                    build_image_logger.info(f"Deleted previous image: {prev_image_name}")
+                except docker.errors.ImageNotFound:
+                    build_image_logger.info(f"Do not find previous image, images list is clean.")
+                except Exception as e:
+                    build_image_logger.error(f"Failed to delete previous image {prev_image_name}: {str(e)}")
         
         
 
@@ -453,10 +350,7 @@ class TestAnalysisAgent(Agent):
     def setup_docker_and_run_test(
         self
     ) -> tuple[str, str, bool]:
-        # building docker image first
-       
         dockerfile = self.dockerfile
-        
         eval_script = self.eval_script
         tool_output = ""
         summary = ""
@@ -465,53 +359,62 @@ class TestAnalysisAgent(Agent):
         cur_build_image_dir = self.get_latest_test_analysis_output_dir()
         os.makedirs(cur_build_image_dir, exist_ok=True)
         build_image_logger = setup_logger(self.task_id, Path(f'{cur_build_image_dir}/build_image.log'))
-        # image_name = f"{self.task_id}:latest_{self.setup_dockerfile_num}"
         image_name = f"{self.task_id}-dockerfile{self.setup_dockerfile_num}:latest"
-       
-        try:
-            self.build_docker_image(dockerfile,
-                                    cur_build_image_dir,
-                                   
-                                    self.task_id, 
-                                    image_name,
-                                    build_image_logger,
-                                    self.client) 
-            tool_output += "Image built successfully!\n"
-            summary += f"Docker image {image_name} built successfully.\n"
-        except docker.errors.BuildError as e:
-           
-            build_log = e.build_log
-            if len(build_log) > MAX_LINE_NUM:
-                half = MAX_LINE_NUM // 2
-                skipped = len(build_log) - MAX_LINE_NUM
-                build_log = (
-                    build_log[:half]
-                    + [f"...skipped {skipped} lines..."]
-                    + build_log[-half:]
-                )
-            tool_output += "\n".join(build_log)
-            build_image_logger.error(e)
-            summary += f"Failed to build Docker image."
-            success = False
-            return tool_output, summary, success
-        except Exception as e:
-          
-            build_image_logger.error(f"Unexpected error: {str(e)}")
-            tool_output += f'{str(e)}\n'
-            summary += f"Unexpected error when building images."
-            success = False
-            return tool_output, summary, success
-        finally:
-            close_logger(build_image_logger)
 
-        test_output, test_summary, test_success = self.run_test(eval_script)
+        # Reuse cached image when the Dockerfile hasn't changed
+        dockerfile_changed = (dockerfile != self._cached_dockerfile)
+        if not dockerfile_changed and self._cached_image_name:
+            build_image_logger.info(
+                f"Dockerfile unchanged — reusing cached image {self._cached_image_name}"
+            )
+            image_name = self._cached_image_name
+            tool_output += "Image built successfully!\n"
+            summary += f"Docker image {image_name} reused (Dockerfile unchanged).\n"
+            close_logger(build_image_logger)
+        else:
+            try:
+                self.build_docker_image(dockerfile,
+                                        cur_build_image_dir,
+                                        self.task_id,
+                                        image_name,
+                                        build_image_logger,
+                                        self.client)
+                self._cached_image_name = image_name
+                self._cached_dockerfile = dockerfile
+                tool_output += "Image built successfully!\n"
+                summary += f"Docker image {image_name} built successfully.\n"
+            except docker.errors.BuildError as e:
+                build_log = e.build_log
+                if len(build_log) > MAX_LINE_NUM:
+                    half = MAX_LINE_NUM // 2
+                    skipped = len(build_log) - MAX_LINE_NUM
+                    build_log = (
+                        build_log[:half]
+                        + [f"...skipped {skipped} lines..."]
+                        + build_log[-half:]
+                    )
+                tool_output += "\n".join(build_log)
+                build_image_logger.error(e)
+                summary += "Failed to build Docker image."
+                success = False
+                return tool_output, summary, success
+            except Exception as e:
+                build_image_logger.error(f"Unexpected error: {str(e)}")
+                tool_output += f'{str(e)}\n'
+                summary += "Unexpected error when building images."
+                success = False
+                return tool_output, summary, success
+            finally:
+                close_logger(build_image_logger)
+
+        test_output, test_summary, test_success = self.run_test(eval_script, image_name)
         tool_output += test_output
         summary += test_summary
         success = test_success
 
         return tool_output, summary, success
 
-    def run_test(self, eval_script: str) -> (str, str, bool):
+    def run_test(self, eval_script: str, image_name: str) -> (str, str, bool):
         tool_output = ""
         summary = ""
         success = False
@@ -521,7 +424,7 @@ class TestAnalysisAgent(Agent):
         cur_test_dir = self.get_latest_test_analysis_output_dir()
         os.makedirs(cur_test_dir, exist_ok=True)
         run_test_logger = setup_logger(self.task_id, Path(f'{cur_test_dir}/run_test.log'))
-        test_image_name = f"{self.task_id}-dockerfile{self.setup_dockerfile_num}:latest"
+        test_image_name = image_name
         test_container_name = f"{self.task_id}-test{self.run_test_num}"
         instance_id = self.task_id
         container = None
@@ -679,11 +582,13 @@ class TestAnalysisAgent(Agent):
                 success = True
 
         finally:
+            # Always remove the container, but only remove the image when it
+            # won't be reused — i.e. when a new build would replace it next round.
+            # We keep the cached image alive so the next round can skip rebuilding.
+            cleanup_container(self.client, container, run_test_logger)
 
-            # Remove instance container + image, close logger
-            cleanup_container(self.client, container,run_test_logger)
-
-            remove_image(self.client, test_image_name, run_test_logger)
+            if test_image_name != self._cached_image_name:
+                remove_image(self.client, test_image_name, run_test_logger)
             close_logger(run_test_logger)
         self.dump_tool_sequence(self.get_latest_test_analysis_output_dir())
         return tool_output, summary, success

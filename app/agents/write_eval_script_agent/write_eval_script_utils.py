@@ -74,7 +74,7 @@ The script must execute the provided test files inside the specified Docker envi
     -The placeholder will be programmatically replaced with the actual patch content during script execution.
 
     -Example structure:
-    git apply -v - <<'EOF_114329324912'\n[CONTENT OF TEST PATCH]\nEOF_114329324912
+    git apply --no-index -v - <<'EOF_114329324912'\n[CONTENT OF TEST PATCH]\nEOF_114329324912
 
 6. You MUST capture the exit code immediately after running the tests using ``rc=$? '', and then echo: ``OMNIGRIL_EXIT_CODE=$rc''. This ensures the judge can determine whether the tests passed successfully.
 
@@ -95,7 +95,7 @@ pip install -r test-requirements.txt && pip install -e .
 git checkout 6de254ef00f99ce5284ab947f2dd1179db6d28f6 "test-data/unit/check-functions.test" "test-data/unit/check-redefine.test"
 
 # Required: apply test patch to update target tests
-git apply -v - <<'EOF_114329324912'
+git apply --no-index -v - <<'EOF_114329324912'
 [CONTENT OF TEST PATCH]
 EOF_114329324912
 
@@ -140,7 +140,7 @@ The script must execute the provided test files inside the specified Docker envi
     -The placeholder will be programmatically replaced with the actual patch content during script execution.
 
     -Example structure:
-    git apply -v - <<'EOF_114329324912'\n[CONTENT OF TEST PATCH]\nEOF_114329324912
+    git apply --no-index -v - <<'EOF_114329324912'\n[CONTENT OF TEST PATCH]\nEOF_114329324912
 
 6. You MUST capture the exit code immediately after running the tests using ``rc=$? '', and then echo: ``OMNIGRIL_EXIT_CODE=$rc''. This ensures the judge can determine whether the tests passed successfully.
 
@@ -172,7 +172,7 @@ wget -O /testbed/test/xmp_no_prefix.jpg https://raw.githubusercontent.com/owner/
 rm -f /testbed/test/xmp_no_prefix_old.jpg
 
 # Required: apply test patch to update target tests
-git apply -v - <<'EOF_114329324912'
+git apply --no-index -v - <<'EOF_114329324912'
 [CONTENT OF TEST PATCH]
 EOF_114329324912
 
@@ -187,7 +187,7 @@ git checkout 6de254ef00f99ce5284ab947f2dd1179db6d28f6 "test-data/unit/check-func
 
 HEREDOC_DELIMITER = "EOF_114329324912"
 
-apply_test_patch_command = f"git apply -v - <<'{HEREDOC_DELIMITER}'\n[CONTENT OF TEST PATCH]\n{HEREDOC_DELIMITER}"
+apply_test_patch_command = f"git apply --no-index -v - <<'{HEREDOC_DELIMITER}'\n[CONTENT OF TEST PATCH]\n{HEREDOC_DELIMITER}"
 
 
 
@@ -283,28 +283,54 @@ def write_eval_script_with_retries(
         
     return result_msg
 
+def _fix_new_file_patch_headers(patch: str) -> str:
+    """Rewrite new-file diff headers so git apply --no-index handles them correctly.
+
+    git apply --no-index still resolves 'a/dev/null' as a relative path and
+    fails with 'error: dev/null: No such file or directory'.  The fix is to
+    rewrite the header line from:
+        diff --git a/dev/null b/<path>
+    to:
+        diff --git a//dev/null b/<path>
+    The double-slash makes git treat it as an absolute /dev/null reference,
+    which is what --no-index expects for new-file creation.
+    """
+    import re
+    return re.sub(
+        r'^(diff --git )a/dev/null( b/)',
+        r'\1a//dev/null\2',
+        patch,
+        flags=re.MULTILINE,
+    )
+
+
 def replace_heredoc_content(original_content, test_patch):
-    """替换 heredoc 中的内容为指定的 test_patch"""
+    """Replace heredoc placeholder with actual test_patch content.
+    Also ensures git apply uses --no-index and fixes new-file patch headers
+    so patches adding new files (--- /dev/null) apply cleanly.
+    """
+    # Fix new-file diff headers before embedding the patch
+    test_patch = _fix_new_file_patch_headers(test_patch)
+
     lines = original_content.splitlines()
     output_lines = []
     in_heredoc = False
     heredoc_delimiter = "EOF_114329324912"
-    
+
     for line in lines:
-        if f" - <<'{heredoc_delimiter}'" in line:
-            # 找到 heredoc 开始行
+        if f" - <<'{heredoc_delimiter}'" in line or f" - <<\"{heredoc_delimiter}\"" in line:
+            # Ensure --no-index is present so new-file patches apply cleanly
+            if "git apply" in line and "--no-index" not in line:
+                line = line.replace("git apply", "git apply --no-index", 1)
             output_lines.append(line)
             in_heredoc = True
-            # 直接插入 test_patch 内容
             output_lines.extend(test_patch.splitlines())
-        elif in_heredoc and line == heredoc_delimiter:
-            # 找到 heredoc 结束行
+        elif in_heredoc and line.strip() == heredoc_delimiter:
             output_lines.append(line)
             in_heredoc = False
         elif not in_heredoc:
-            # 非 heredoc 内容保持不变
             output_lines.append(line)
-    
+
     return '\n'.join(output_lines)
 
 

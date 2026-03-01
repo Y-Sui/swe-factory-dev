@@ -236,6 +236,12 @@ Based on the above, generate test file(s) as a unified diff wrapped in `<test_pa
 2. **Pass-to-Pass (P2P)**: Regression tests for related functionality that should pass both before and after the patch.
 
 All tests must be directly relevant to the PR and its related issues — do NOT test unrelated functions. If existing tests are provided, generate **additional** complementary tests that cover cases not already tested — do NOT duplicate existing test coverage. Make sure test file paths are reasonable for the repository structure.
+
+**Critical rules for import paths (especially monorepos):**
+Python imports are resolved relative to the directory where pytest runs, NOT the repo root. If the repo is a monorepo and the app lives in a subdirectory (e.g. `apps/miroflow-agent/`), that prefix must be stripped from import paths. For example, `apps/miroflow-agent/src/core/orchestrator.py` imports as `from src.core.orchestrator import Orchestrator`. Also note: Python cannot import paths containing hyphens in directory names (e.g. `apps.miroflow-agent.src` is invalid — use `src.core` directly).
+
+**Critical rule against over-mocking:**
+Do NOT mock the function or class that the patch is fixing. If the patch modifies `def foo()` in `module.py`, your F2P test must call the real `foo()` and assert on its actual return value or side effect. Mocking `foo` itself makes the test trivially pass before and after the patch — it cannot detect the bug. Only mock external dependencies (network calls, file I/O, third-party APIs) that would make the test non-deterministic or slow.
 """
 
 
@@ -258,9 +264,10 @@ REFLEXION_CRITIQUE_PROMPT = """You are reviewing auto-generated test files for q
 1. **F2P correctness**: Would the F2P tests actually FAIL on the code BEFORE the patch? Do they test the exact behavior that the patch changes?
 2. **P2P correctness**: Would the P2P tests actually PASS both before and after the patch? Are they testing stable, related behavior?
 3. **Relevance**: Are ALL tests directly related to the PR and its issues? Flag any tests targeting unrelated functions.
-4. **Import paths**: Do the import paths match the actual repository structure visible in the patch?
-5. **Determinism**: Are tests free of randomness, timing dependencies, or external service calls?
-6. **Edge cases**: Are important edge cases covered?
+4. **Import paths**: Do the import paths match the actual repository structure visible in the patch? For monorepos, verify the prefix is stripped correctly (e.g. `apps/miroflow-agent/src/foo.py` → `from src.foo import ...`).
+5. **Over-mocking**: Do the F2P tests mock the very function or class being patched? If so, the test is broken — it will pass regardless of the actual code. F2P tests must call the real implementation of the patched code.
+6. **Determinism**: Are tests free of randomness, timing dependencies, or external service calls?
+7. **Edge cases**: Are important edge cases covered?
 
 Provide your critique as structured text. If the tests are high-quality and no changes are needed, explicitly say "TESTS_APPROVED".
 """

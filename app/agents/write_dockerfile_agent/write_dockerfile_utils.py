@@ -180,6 +180,134 @@ Return modified dockerfile in defined format. Wrap results in <dockerfile></dock
 """
 
 
+REPO_ENV_TEMPLATES = {
+    "MiroMindAI/miroflow": """### Repo Environment: MiroMindAI/miroflow
+- Language: Python >=3.12
+- Build system: hatchling (`pyproject.toml`, `[build-system] requires = ["hatchling"]`)
+- Package manager: uv ONLY — do NOT mix with `python3 -m venv` or `pip install`
+- Install uv (IMPORTANT — use one of these two methods, do NOT use `pip install uv`):
+  ```dockerfile
+  # Method A (recommended): copy the uv binary directly from the official image
+  COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+  # Method B: install script, installs to /usr/local/bin
+  RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+  ```
+- CRITICAL — use uv exclusively, never mix with python3 -m venv:
+  `uv sync` creates and manages its own `.venv` automatically at the WORKDIR.
+  If you also run `python3 -m venv venv`, you get TWO separate venvs and pytest
+  ends up in `.venv` while PATH points to `venv` — pytest will not be found.
+  Correct Dockerfile pattern:
+  ```dockerfile
+  WORKDIR /testbed
+  RUN git clone https://github.com/MiroMindAI/miroflow . && git reset --hard <commit>
+  COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+  RUN uv sync                              # creates /testbed/.venv automatically
+  RUN uv pip install pytest pytest-asyncio # installs into /testbed/.venv
+  ENV PATH="/testbed/.venv/bin:$PATH"
+  ```
+  eval.sh activation: `source /testbed/.venv/bin/activate`
+- Test runner: pytest (no existing tests — LLM-generated tests will be placed in /testbed/tests/)
+- Key deps: anthropic, openai, mcp, fastmcp, hydra-core, rich, fire, google-genai
+- Entry point: main.py
+- Recommended base: ubuntu:22.04 + deadsnakes PPA for Python 3.12
+  ```dockerfile
+  RUN apt update && apt install -y software-properties-common curl git
+  RUN add-apt-repository ppa:deadsnakes/ppa && apt update
+  RUN apt install -y python3.12 python3.12-venv python3.12-dev
+  RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
+  ```
+""",
+
+    "MiroMindAI/MiroThinker": """### Repo Environment: MiroMindAI/MiroThinker
+- Language: Python >=3.12
+- Structure: Monorepo — `apps/` and `libs/` sub-packages
+  - `libs/miroflow-tools/` — install first (editable)
+  - `apps/miroflow-agent/` — main app (where most patches apply), depends on miroflow-tools
+- Build system: hatchling for each sub-package
+- Package manager: `uv` (preferred) or `pip`
+- Install uv (IMPORTANT — use one of these two methods, do NOT use `pip install uv`):
+  ```dockerfile
+  # Method A (recommended): copy the uv binary directly from the official image
+  COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+  # Method B: install script, installs to /usr/local/bin
+  RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+  ```
+- CRITICAL — venv location and uv usage:
+  `uv sync` creates `.venv` at the CURRENT WORKDIR. You MUST set WORKDIR to
+  `/testbed/apps/miroflow-agent` BEFORE running `uv venv` or `uv sync`, so the
+  venv lands at `/testbed/apps/miroflow-agent/.venv`.
+  Do NOT run `uv venv` or `uv sync` from `/testbed` — the venv will be at the
+  wrong location and eval.sh will fail to activate it.
+  Correct Dockerfile pattern (order matters):
+  ```dockerfile
+  COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+  WORKDIR /testbed
+  RUN git clone https://github.com/MiroMindAI/MiroThinker . && git reset --hard <commit>
+  # Install libs/miroflow-tools first using --system (no venv yet)
+  RUN uv pip install --system -e libs/miroflow-tools
+  # Now switch to the main app directory and create venv + sync there
+  WORKDIR /testbed/apps/miroflow-agent
+  RUN uv venv                              # creates /testbed/apps/miroflow-agent/.venv
+  RUN uv sync                              # installs all deps into that venv
+  RUN uv pip install pytest pytest-asyncio pytest-cov pytest-mock
+  ENV PATH="/testbed/apps/miroflow-agent/.venv/bin:$PATH"
+  ```
+  eval.sh activation: `source /testbed/apps/miroflow-agent/.venv/bin/activate`
+- WORKDIR for Dockerfile: `/testbed/apps/miroflow-agent` (this is where uv.lock and pyproject.toml live for the main app)
+- Test runner: pytest + pytest-asyncio (async tests use `asyncio_mode = "auto"`)
+  - Run from `/testbed/apps/miroflow-agent`: `pytest tests/ -v`
+  - Import paths in tests are relative to `apps/miroflow-agent/` — e.g. patch file `apps/miroflow-agent/src/core/foo.py` → `from src.core.foo import Foo`
+- Test deps: pytest, pytest-asyncio, pytest-cov, pytest-xdist, pytest-mock
+- Key deps: anthropic, openai, mcp, fastmcp, e2b-code-interpreter, hydra-core, transformers
+- Recommended base: ubuntu:22.04 + deadsnakes PPA for Python 3.12
+  ```dockerfile
+  RUN apt update && apt install -y software-properties-common curl git
+  RUN add-apt-repository ppa:deadsnakes/ppa && apt update
+  RUN apt install -y python3.12 python3.12-venv python3.12-dev
+  RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
+  ```
+  eval.sh pattern:
+  ```bash
+  cd /testbed/apps/miroflow-agent
+  source /testbed/apps/miroflow-agent/.venv/bin/activate
+  git apply --no-index -v - <<'EOF_114329324912'
+  [CONTENT OF TEST PATCH]
+  EOF_114329324912
+  pytest tests/ -v
+  rc=$?
+  echo "OMNIGRIL_EXIT_CODE=$rc"
+  ```
+""",
+
+    "MiroMindAI/sd-torchtune": """### Repo Environment: MiroMindAI/sd-torchtune
+- Language: Python >=3.9 (use 3.10 for broad compatibility)
+- Build system: setuptools (`pyproject.toml`, `[build-system] requires = ["setuptools", "wheel"]`)
+- Package manager: pip
+- Install:
+  ```
+  pip install torch torchvision  # install PyTorch first (CPU version for tests)
+  pip install -e ".[dev]"        # installs torchtune + all dev/test deps
+  pip install torchao            # REQUIRED: tests/conftest.py imports torchao; not in [dev] extras
+  ```
+- Test runner: pytest 7.4.0 (`pytest tests/ -v`)
+  - Existing tests: 159 files under `tests/`
+  - Run subset: `pytest tests/torchtune/ -v --without-integration`
+- Test deps (from [dev]): pytest==7.4.0, pytest-cov, pytest-mock, pytest-integration, expecttest
+- CLI entry: `tune` command (`torchtune._cli.tune:main`)
+- Key deps: torchdata, liger-kernel, datasets, huggingface_hub, safetensors, sentencepiece, tiktoken
+- Private repo: requires GITHUB_TOKEN (already handled by token injection)
+- Recommended base: ubuntu:22.04 + Python 3.10 (avoid heavy CUDA image unless GPU test needed)
+""",
+}
+
+
+def get_repo_env_template(repo_name: str) -> str:
+    """Return repo-specific env template string, or empty string if not found."""
+    return REPO_ENV_TEMPLATES.get(repo_name, "")
+
+
 def get_system_prompt_dockerfile():
     return SYSTEM_PROMPT_DOCKERFILE
 
