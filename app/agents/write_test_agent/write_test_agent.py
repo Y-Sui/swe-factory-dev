@@ -1,7 +1,7 @@
 from app.data_structures import MessageThread
 from app.agents.write_test_agent import write_test_utils
 from app.agents.agent import Agent
-from app.task import Task
+from app.task import SweTask
 import os
 from app.log import (
     print_acr,
@@ -26,7 +26,7 @@ class WriteTestAgent(Agent):
 
     def __init__(
         self,
-        task: Task,
+        task: SweTask,
         output_dir: str,
         repo_basic_info: str,
         max_reflexion_rounds: int = 2,
@@ -37,11 +37,11 @@ class WriteTestAgent(Agent):
         self.repo_basic_info = repo_basic_info
         self.max_reflexion_rounds = max_reflexion_rounds
         self.run_count = 0
-        self.generated_test_patch = None
+        self.generated_test_patch: str | None = None
         self.generated_test_files = []
         # Select language-specific system prompt
         self._language = getattr(task, "language", "python") or "python"
-        self.pending_guidance = None
+        self.pending_guidance: str | None = None
         self.init_msg_thread()
 
     def init_msg_thread(self) -> None:
@@ -86,6 +86,8 @@ class WriteTestAgent(Agent):
         # Build user prompt
         user_prompt = write_test_utils.USER_PROMPT_WRITE_TEST.format(
             repo_info=self.repo_basic_info,
+            instance_id=self.task.task_id,
+            base_commit=self.task.commit,
             problem_statement=self.task.problem_statement,
             patch_content=patch_content,
             existing_tests=existing_test_info,

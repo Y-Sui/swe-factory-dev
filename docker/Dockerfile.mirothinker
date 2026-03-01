@@ -1,0 +1,18 @@
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y \
+    git curl ca-certificates build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+RUN git clone https://github.com/MiroMindAI/MiroThinker.git /testbed
+WORKDIR /testbed/apps/miroflow-agent
+
+# Install all deps including dev deps (for pytest)
+RUN uv sync --frozen
+
+# Verify pytest is available
+RUN uv run pytest --version

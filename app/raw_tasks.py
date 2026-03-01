@@ -87,8 +87,8 @@ class RawSweTask(RawTask):
             # image_urls=task_info['image_urls'],
             # reference_setup=task_info['reference_setup'],
             version=task_info['version'],
-            client = client,
-            task_info = task_info
+            client=client,
+            task_info=task_info,
         )
 
     def dump_meta_data(self, output_dir: str):

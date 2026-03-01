@@ -42,10 +42,4 @@ enable_web_search: bool = False
 
 agent_mode: str = "multi_agent"
 
-disable_memory_pool: bool = False
-
 disable_run_test: bool = False
-
-disable_download_test_resources: bool = False
-
-using_ubuntu_only: bool = False

@@ -1,18 +1,14 @@
 """
-Prompts, patch summarizer, extraction logic, reflexion loop, and retry logic
+Patch summarizer, extraction logic, reflexion loop, and retry logic
 for WriteTestAgent.
 
-Supports multi-language test generation (Python, JavaScript, Java, TypeScript)
-and two test categories:
-  - Fail-to-Pass (F2P): tests that FAIL before the gold patch and PASS after.
-  - Pass-to-Pass (P2P): regression tests that PASS both before and after the patch.
+All prompts live in app/prompts/prompts.py.
 """
 
 import json
 import os
 import re
 from collections.abc import Callable
-from copy import deepcopy
 from os.path import join as pjoin
 
 from loguru import logger
@@ -20,278 +16,17 @@ from loguru import logger
 from app.data_structures import MessageThread
 from app.log import print_acr, print_patch_generation
 from app.model import common
-from app.task import Task
-
-
-# ---------------------------------------------------------------------------
-# Multi-language system prompts
-# ---------------------------------------------------------------------------
-
-# Base responsibilities shared by all languages
-_SHARED_RESPONSIBILITIES = """
-### Your Responsibilities:
-1. Analyze the problem statement and patch to understand what behavior changed.
-2. Generate **two categories** of tests:
-   - **Fail-to-Pass (F2P) tests**: These MUST fail on the codebase BEFORE the gold patch is applied and PASS after the patch. They directly verify the bug fix or new behavior.
-   - **Pass-to-Pass (P2P) tests**: These MUST pass both BEFORE and AFTER the gold patch. They are regression tests ensuring that existing related functionality is not broken by the change.
-3. All tests must be **directly relevant** to the PR and its related issues — do NOT generate tests targeting unrelated functions or modules not mentioned in the patch.
-4. Tests should be focused, minimal, and deterministic.
-5. Import paths and module names must match the repository structure shown in the patch.
-
-### Output Format:
-Return your generated tests as a unified diff that creates new test files. Wrap the diff in `<test_patch>` tags.
-Use comments in the test files to clearly mark F2P vs P2P tests, e.g.:
-  # --- F2P: tests that should fail before patch, pass after ---
-  # --- P2P: regression tests that should always pass ---
-
-The diff must:
-- Use `diff --git` format with `/dev/null` as the `a/` side (since these are new files)
-- Include proper `---` and `+++` headers
-- Include `@@ -0,0 +1,N @@` hunk headers
-"""
-
-SYSTEM_PROMPT_PYTHON = (
-    """You are an expert software testing engineer. Your task is to generate Python pytest-compatible test files that verify the changes described in a pull request.
-
-You will receive:
-- **Problem statement**: The description of the issue or feature being addressed.
-- **Patch content**: The code changes (unified diff) made to resolve the issue.
-- **Repository info**: Basic information about the target repository.
-- **Guidance** (if available): Feedback from a test analysis agent on how to improve previously generated tests.
-"""
-    + _SHARED_RESPONSIBILITIES
-    + """
-Example:
-<test_patch>
-diff --git a/dev/null b/tests/test_fix_issue.py
---- /dev/null
-+++ b/tests/test_fix_issue.py
-@@ -0,0 +1,25 @@
-+import pytest
-+from mymodule import my_function
-+
-+# --- F2P: tests that should fail before patch, pass after ---
-+def test_my_function_returns_correct_value():
-+    result = my_function(42)
-+    assert result == expected_value
-+
-+# --- P2P: regression tests that should always pass ---
-+def test_my_function_handles_edge_case():
-+    result = my_function(0)
-+    assert result is not None
-</test_patch>
-"""
+from app.prompts.prompts import (
+    get_test_system_prompt,
+    TEST_USER_PROMPT,
+    TEST_REFLEXION_CRITIQUE_PROMPT,
+    TEST_REFLEXION_REFINE_PROMPT,
 )
 
-SYSTEM_PROMPT_JAVASCRIPT = (
-    """You are an expert software testing engineer. Your task is to generate JavaScript test files (using Jest or Mocha) that verify the changes described in a pull request.
-
-You will receive:
-- **Problem statement**: The description of the issue or feature being addressed.
-- **Patch content**: The code changes (unified diff) made to resolve the issue.
-- **Repository info**: Basic information about the target repository.
-- **Guidance** (if available): Feedback from a test analysis agent on how to improve previously generated tests.
-"""
-    + _SHARED_RESPONSIBILITIES
-    + """
-Example:
-<test_patch>
-diff --git a/dev/null b/tests/fix_issue.test.js
---- /dev/null
-+++ b/tests/fix_issue.test.js
-@@ -0,0 +1,20 @@
-+const { myFunction } = require('../src/myModule');
-+
-+// --- F2P: tests that should fail before patch, pass after ---
-+describe('myFunction fix', () => {
-+  test('returns correct value after fix', () => {
-+    expect(myFunction(42)).toBe(expectedValue);
-+  });
-+});
-+
-+// --- P2P: regression tests that should always pass ---
-+describe('myFunction regression', () => {
-+  test('handles edge case', () => {
-+    expect(myFunction(0)).not.toBeNull();
-+  });
-+});
-</test_patch>
-"""
-)
-
-SYSTEM_PROMPT_JAVA = (
-    """You are an expert software testing engineer. Your task is to generate Java JUnit test files that verify the changes described in a pull request.
-
-You will receive:
-- **Problem statement**: The description of the issue or feature being addressed.
-- **Patch content**: The code changes (unified diff) made to resolve the issue.
-- **Repository info**: Basic information about the target repository.
-- **Guidance** (if available): Feedback from a test analysis agent on how to improve previously generated tests.
-"""
-    + _SHARED_RESPONSIBILITIES
-    + """
-Example:
-<test_patch>
-diff --git a/dev/null b/src/test/java/com/example/FixIssueTest.java
---- /dev/null
-+++ b/src/test/java/com/example/FixIssueTest.java
-@@ -0,0 +1,25 @@
-+package com.example;
-+
-+import org.junit.jupiter.api.Test;
-+import static org.junit.jupiter.api.Assertions.*;
-+
-+// --- F2P: tests that should fail before patch, pass after ---
-+class FixIssueTest {
-+    @Test
-+    void testReturnsCorrectValue() {
-+        assertEquals(expectedValue, MyClass.myMethod(42));
-+    }
-+
-+    // --- P2P: regression tests that should always pass ---
-+    @Test
-+    void testHandlesEdgeCase() {
-+        assertNotNull(MyClass.myMethod(0));
-+    }
-+}
-</test_patch>
-"""
-)
-
-SYSTEM_PROMPT_TYPESCRIPT = (
-    """You are an expert software testing engineer. Your task is to generate TypeScript test files (using Jest or Vitest) that verify the changes described in a pull request.
-
-You will receive:
-- **Problem statement**: The description of the issue or feature being addressed.
-- **Patch content**: The code changes (unified diff) made to resolve the issue.
-- **Repository info**: Basic information about the target repository.
-- **Guidance** (if available): Feedback from a test analysis agent on how to improve previously generated tests.
-"""
-    + _SHARED_RESPONSIBILITIES
-    + """
-Example:
-<test_patch>
-diff --git a/dev/null b/tests/fix_issue.test.ts
---- /dev/null
-+++ b/tests/fix_issue.test.ts
-@@ -0,0 +1,20 @@
-+import { myFunction } from '../src/myModule';
-+
-+// --- F2P: tests that should fail before patch, pass after ---
-+describe('myFunction fix', () => {
-+  it('returns correct value after fix', () => {
-+    expect(myFunction(42)).toBe(expectedValue);
-+  });
-+});
-+
-+// --- P2P: regression tests that should always pass ---
-+describe('myFunction regression', () => {
-+  it('handles edge case', () => {
-+    expect(myFunction(0)).not.toBeNull();
-+  });
-+});
-</test_patch>
-"""
-)
-
-# Keep backward-compatible alias
-SYSTEM_PROMPT_WRITE_TEST = SYSTEM_PROMPT_PYTHON
-
-
-def get_test_system_prompt(language: str) -> str:
-    """Select the language-specific system prompt for test generation."""
-    lang = (language or "").lower().strip()
-    if lang in ("javascript", "js", "nodejs"):
-        return SYSTEM_PROMPT_JAVASCRIPT
-    elif lang in ("java",):
-        return SYSTEM_PROMPT_JAVA
-    elif lang in ("typescript", "ts"):
-        return SYSTEM_PROMPT_TYPESCRIPT
-    # Default to Python for unknown languages
-    return SYSTEM_PROMPT_PYTHON
-
-
-# ---------------------------------------------------------------------------
-# User prompt template (language-agnostic)
-# ---------------------------------------------------------------------------
-
-USER_PROMPT_WRITE_TEST = """Generate test files for the following pull request.
-
-### Repository Info:
-{repo_info}
-
-### Problem Statement:
-{problem_statement}
-
-### Patch (code changes):
-{patch_content}
-
-### Existing Tests (if any):
-{existing_tests}
-
-Based on the above, generate test file(s) as a unified diff wrapped in `<test_patch>` tags.
-
-**Important**: You MUST generate two categories of tests:
-1. **Fail-to-Pass (F2P)**: Tests that specifically verify the bug fix / new behavior. These tests MUST fail on the codebase before the patch and pass after the patch is applied.
-2. **Pass-to-Pass (P2P)**: Regression tests for related functionality that should pass both before and after the patch.
-
-All tests must be directly relevant to the PR and its related issues — do NOT test unrelated functions. If existing tests are provided, generate **additional** complementary tests that cover cases not already tested — do NOT duplicate existing test coverage. Make sure test file paths are reasonable for the repository structure.
-
-**Critical rules for import paths (especially monorepos):**
-Python imports are resolved relative to the directory where pytest runs, NOT the repo root. If the repo is a monorepo and the app lives in a subdirectory (e.g. `apps/miroflow-agent/`), that prefix must be stripped from import paths. For example, `apps/miroflow-agent/src/core/orchestrator.py` imports as `from src.core.orchestrator import Orchestrator`. Also note: Python cannot import paths containing hyphens in directory names (e.g. `apps.miroflow-agent.src` is invalid — use `src.core` directly).
-
-**Critical rule against over-mocking:**
-Do NOT mock the function or class that the patch is fixing. If the patch modifies `def foo()` in `module.py`, your F2P test must call the real `foo()` and assert on its actual return value or side effect. Mocking `foo` itself makes the test trivially pass before and after the patch — it cannot detect the bug. Only mock external dependencies (network calls, file I/O, third-party APIs) that would make the test non-deterministic or slow.
-"""
-
-
-# ---------------------------------------------------------------------------
-# Reflexion prompts for self-critique and refinement
-# ---------------------------------------------------------------------------
-
-REFLEXION_CRITIQUE_PROMPT = """You are reviewing auto-generated test files for quality. Analyze the following generated tests and provide a detailed critique.
-
-### Problem Statement:
-{problem_statement}
-
-### Gold Patch (code changes):
-{patch_content}
-
-### Generated Test Patch:
-{test_patch}
-
-### Review Criteria:
-1. **F2P correctness**: Would the F2P tests actually FAIL on the code BEFORE the patch? Do they test the exact behavior that the patch changes?
-2. **P2P correctness**: Would the P2P tests actually PASS both before and after the patch? Are they testing stable, related behavior?
-3. **Relevance**: Are ALL tests directly related to the PR and its issues? Flag any tests targeting unrelated functions.
-4. **Import paths**: Do the import paths match the actual repository structure visible in the patch? For monorepos, verify the prefix is stripped correctly (e.g. `apps/miroflow-agent/src/foo.py` → `from src.foo import ...`).
-5. **Over-mocking**: Do the F2P tests mock the very function or class being patched? If so, the test is broken — it will pass regardless of the actual code. F2P tests must call the real implementation of the patched code.
-6. **Determinism**: Are tests free of randomness, timing dependencies, or external service calls?
-7. **Edge cases**: Are important edge cases covered?
-
-Provide your critique as structured text. If the tests are high-quality and no changes are needed, explicitly say "TESTS_APPROVED".
-"""
-
-REFLEXION_REFINE_PROMPT = """Based on the following critique of the generated tests, produce an improved version.
-
-### Critique:
-{critique}
-
-### Original Generated Test Patch:
-{test_patch}
-
-### Problem Statement:
-{problem_statement}
-
-### Gold Patch:
-{patch_content}
-
-Generate improved test files as a unified diff wrapped in `<test_patch>` tags. Address every issue raised in the critique. Ensure:
-- F2P tests truly fail before the patch and pass after
-- P2P tests truly pass both before and after
-- All tests are relevant to the PR
-- Import paths are correct
-"""
+# Re-export for any callers that still reference write_test_utils directly
+USER_PROMPT_WRITE_TEST = TEST_USER_PROMPT
+REFLEXION_CRITIQUE_PROMPT = TEST_REFLEXION_CRITIQUE_PROMPT
+REFLEXION_REFINE_PROMPT = TEST_REFLEXION_REFINE_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -310,12 +45,10 @@ def summarize_large_patch(patch: str, max_chars: int = 15000) -> str:
     for chunk in chunks:
         if not chunk.strip():
             continue
-        # Small chunks: include verbatim
         if len(chunk) <= 2000:
             summarized_parts.append(chunk)
             total_chars += len(chunk)
         else:
-            # Extract header + hunk headers + first few changed lines per hunk
             lines = chunk.splitlines(keepends=True)
             kept_lines = []
             in_hunk = False
@@ -359,7 +92,6 @@ def extract_test_patch_from_response(res_text: str, output_dir: str) -> tuple[st
     for content in matches:
         clean = content.strip()
         if clean:
-            # Strip wrapping ```diff ... ``` if present
             lines = clean.splitlines()
             if len(lines) >= 2 and '```' in lines[0] and '```' in lines[-1]:
                 lines = lines[1:-1]
@@ -380,17 +112,14 @@ def extract_test_patch_from_response(res_text: str, output_dir: str) -> tuple[st
     if not patch_content:
         return None, []
 
-    # Ensure it starts with diff --git
     idx = patch_content.find('diff --git')
     if idx > 0:
         patch_content = patch_content[idx:]
     elif idx < 0:
         return None, []
 
-    # Extract test file paths from +++ b/... lines
     test_files = re.findall(r'\+\+\+ b/(.*)', patch_content)
 
-    # Save the generated patch
     os.makedirs(output_dir, exist_ok=True)
     patch_path = pjoin(output_dir, "generated_test_patch.diff")
     with open(patch_path, "w") as f:
@@ -433,7 +162,6 @@ def write_test_with_retries(
 
         raw_output_file = pjoin(output_dir, f"agent_write_test_raw_{i}")
 
-        # Call the model
         try:
             res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg())
         except Exception as e:
@@ -445,13 +173,9 @@ def write_test_with_retries(
         with open(raw_output_file, "w") as f:
             f.write(res_text)
 
-        print_patch_generation(
-            res_text, f"test gen try {i} / {retries}", print_callback=print_callback
-        )
+        print_patch_generation(res_text, f"test gen try {i} / {retries}", print_callback=print_callback)
 
-        # Try to extract the test patch
         patch_content, test_files = extract_test_patch_from_response(res_text, output_dir)
-
         can_stop = patch_content is not None and len(test_files) > 0
 
         if can_stop:
@@ -486,9 +210,9 @@ def refine_tests_with_reflexion(
     Run multi-round reflexion to improve generated tests.
 
     Each round:
-      1. Ask LLM to critique the current test patch (F2P/P2P correctness, relevance, imports).
-      2. If critique says tests are approved, stop early.
-      3. Otherwise, ask LLM to refine based on critique.
+      1. Critique the current test patch.
+      2. If "TESTS_APPROVED" in critique, stop early.
+      3. Otherwise, refine based on critique.
 
     Returns (refined_patch, refined_test_files).
     """
@@ -499,8 +223,7 @@ def refine_tests_with_reflexion(
         round_dir = pjoin(output_dir, f"reflexion_round_{round_num}")
         os.makedirs(round_dir, exist_ok=True)
 
-        # --- Step 1: Self-critique ---
-        critique_prompt = REFLEXION_CRITIQUE_PROMPT.format(
+        critique_prompt = TEST_REFLEXION_CRITIQUE_PROMPT.format(
             problem_statement=summarize_large_patch(problem_statement, 5000),
             patch_content=summarize_large_patch(code_patch),
             test_patch=current_patch,
@@ -514,19 +237,16 @@ def refine_tests_with_reflexion(
             break
         msg_thread.add_model(critique_text, [])
 
-        # Save critique
         with open(pjoin(round_dir, "critique.txt"), "w") as f:
             f.write(critique_text)
 
         logger.info(f"Reflexion round {round_num}: critique completed.")
 
-        # Early exit if tests are approved
         if "TESTS_APPROVED" in critique_text:
             logger.info(f"Reflexion round {round_num}: tests approved, stopping early.")
             break
 
-        # --- Step 2: Refine based on critique ---
-        refine_prompt = REFLEXION_REFINE_PROMPT.format(
+        refine_prompt = TEST_REFLEXION_REFINE_PROMPT.format(
             critique=critique_text,
             test_patch=current_patch,
             problem_statement=summarize_large_patch(problem_statement, 5000),
@@ -541,11 +261,9 @@ def refine_tests_with_reflexion(
             break
         msg_thread.add_model(refined_text, [])
 
-        # Save raw refinement output
         with open(pjoin(round_dir, "refinement_raw.txt"), "w") as f:
             f.write(refined_text)
 
-        # Extract refined test patch
         refined_patch, refined_files = extract_test_patch_from_response(refined_text, round_dir)
 
         if refined_patch and len(refined_files) > 0:

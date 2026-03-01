@@ -30,7 +30,7 @@ from app.post_process import (
    
 )
 from app.raw_tasks import RawGithubTask, RawLocalTask, RawSweTask, RawTask
-from app.task import Task
+from app.task import Task, SweTask
 import multiprocessing
 import time
 
@@ -109,13 +109,8 @@ def main(args, subparser_dest_attr_name: str = "command"):
     globals.setup_dir = args.setup_dir 
     
     globals.organize_output_only = args.organize_output_only
-    globals.results_path = args.results_path 
-    globals.disable_memory_pool = args.disable_memory_pool
+    globals.results_path = args.results_path
     globals.disable_run_test = args.disable_run_test
-
-    globals.disable_download_test_resources= args.disable_download_test_resources
-
-    globals.using_ubuntu_only = args.using_ubuntu_only
     
     subcommand = getattr(args, subparser_dest_attr_name)
     if subcommand == "swe-bench":
@@ -343,28 +338,10 @@ def add_task_related_args(parser: ArgumentParser) -> None:
     )
   
     parser.add_argument(
-        "--disable-memory-pool",
-        action="store_true",
-        default=False,
-        help="Enable layered code search.",
-    )
-    parser.add_argument(
         "--disable-run-test",
         action="store_true",
         default=False,
-        help="Enable layered code search.",
-    )
-    parser.add_argument(
-        "--disable-download-test-resources",
-        action="store_true",
-        default=False,
-        help="Enable layered code search.",
-    )
-    parser.add_argument(
-        "--using-ubuntu-only",
-        action="store_true",
-        default=False,
-        help="Enable layered code search.",
+        help="Skip Docker test execution (generate Dockerfile+eval.sh only).",
     )
     parser.add_argument(
         "--task-batch",
@@ -719,7 +696,7 @@ def run_raw_task(
 
 
 def do_inference(
-    python_task: Task,
+    python_task: SweTask,
     task_output_dir: str,
     print_callback: Callable[[dict], None] | None = None,
 ) -> bool:
@@ -749,17 +726,15 @@ def do_inference(
 
     
     try:
-        agents_manager = AgentsManager(python_task,
-                                        task_output_dir,
-                                        client,
-                                        start_time,
-                                        globals.conv_round_limit,
-                                        globals.results_path,
-                                        disable_memory_pool = globals.disable_memory_pool,
-                                        disable_run_test= globals.disable_run_test,
-                                        disable_download_test_resources = globals.disable_download_test_resources,
-                                        using_ubuntu_only = globals.using_ubuntu_only,
-                                        )
+        agents_manager = AgentsManager(
+            python_task,
+            task_output_dir,
+            client,
+            start_time,
+            globals.conv_round_limit,
+            globals.results_path,
+            disable_run_test=globals.disable_run_test,
+        )
         agents_manager.run_workflow()
         run_ok = True
         end_time = datetime.now()

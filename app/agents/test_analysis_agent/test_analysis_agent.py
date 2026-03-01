@@ -3,7 +3,7 @@ import os
 from loguru import logger
 from app.agents.agent import Agent
 from app.data_structures import FunctionCallIntent, MessageThread
-from app.task import Task
+from app.task import SweTask
 from app.agents.test_analysis_agent import test_analysis_utils
 from app.agents.test_analysis_agent.docker_utils  import (
     cleanup_container,
@@ -40,7 +40,7 @@ class TestAnalysisAgent(Agent):
     """
     api_functions = ["setup_docker_and_run_test"]
 
-    def __init__(self, task: Task, output_dir: str, repo_basic_info: str, client:docker.DockerClient):
+    def __init__(self, task: SweTask, output_dir: str, repo_basic_info: str, client:docker.DockerClient):
         super().__init__(agent_id=self.__class__.__name__)
         self.msg_thread  = MessageThread()
         self.task = task
@@ -54,14 +54,14 @@ class TestAnalysisAgent(Agent):
         self.test_analysis_dir = os.path.join(self.output_dir, "test_analysis_agent") 
         # self.build_image_dir = os.path.join(self.output_dir, "build_image") 
         # self.run_test_dir = os.path.join(self.output_dir, "run_test") 
-        self.eval_script_skeleton = None
-        self.dockerfile = None
-        self.eval_script = None
+        self.eval_script_skeleton: str | None = None
+        self.dockerfile: str | None = None
+        self.eval_script: str | None = None
         self.timeout = 3600
         self.disable_run_test = False
-        self.f2p_classification = None
-        self._cached_image_name = None   # image tag of last successfully built image
-        self._cached_dockerfile = None   # dockerfile content used for that build
+        self.f2p_classification: str | None = None
+        self._cached_image_name: str | None = None   # image tag of last successfully built image
+        self._cached_dockerfile: str | None = None   # dockerfile content used for that build
         # self.init_msg_thread()
 
 

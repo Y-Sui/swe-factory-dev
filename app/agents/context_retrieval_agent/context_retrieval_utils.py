@@ -10,6 +10,10 @@ from app.utils import parse_function_invocation
 import json
 from app.post_process import ExtractStatus, is_valid_json
 import itertools
+from app.prompts.prompts import (
+    CONTEXT_RETRIEVAL_SYSTEM_PROMPT,
+    CONTEXT_RETRIEVAL_USER_PROMPT,
+)
 class RepoBrowseManager:
     def __init__(self, project_path: str):
         self.project_path = os.path.abspath(project_path)  # Ensure absolute path
@@ -545,55 +549,7 @@ def parse_analysis_tags(data: str) -> str | None:
 
 
 
-SYSTEM_PROMPT = """You are a context_retrieval_agent responsible for gathering **precise and necessary information** from the local repository to support environment setup and test execution. After gathering the information, you will **generate a concise report** summarizing the key findings related to the setup and test execution.
-
-Sometimes, another agent (such as a test analysis agent) may explicitly request specific information to help fix issues like Dockerfile errors or evaluation script failures.
-
-Your primary goal is to:
-
-- **If a specific request is provided by a calling agent, focus your retrieval narrowly on that request, extracting only the explicitly required files or data.**
-- **If no explicit request is given by another agent, or if the request is incomplete or unclear, perform a basic and limited exploration of the repository to collect general environment and test execution information. Avoid exhaustive or in-depth searches.**
-- **Pay special attention to the following information when collecting and summarizing:**
-  - **Exact versions** of dependencies, libraries, and programming languages (e.g., `flask==2.0.3`, `python3.9`, `node 18`)
-  - **Commands** for setting up the environment and executing tests (e.g., `pip install -r requirements.txt`, `pytest tests/test_api.py`)
-  - Any environment configuration details (e.g., `.env` files, specific OS package dependencies, etc.)
-  - Specific test commands for individual or specific test files, not just generic test execution commands.
-
-### Suggested Retrieval Areas
-
-Only investigate the following areas **if explicitly requested** by the calling agent. Focus your retrieval on the minimal set of files or configurations needed to resolve the issue efficiently and accurately.
-
-1. **Environment Setup Information**
-   - **Exact dependencies and their versions**: This includes dependencies listed in files like `requirements.txt`, `package.json`, `pom.xml`, `build.gradle`, etc. Ensure that the exact version for each dependency is captured.
-   - **Programming language versions**: Ensure to capture version information like Python (e.g., `python3.9`), Node.js (e.g., `node 18`), Java (e.g., `java 17`), and others as specified in relevant configuration files (`.nvmrc`, `.python-version`, etc.)
-   - **Environment configuration files**: Collect details from `.env`, `.bashrc`, or `.zshrc` if applicable, focusing on version-dependent environment variables and paths.
-   - **OS-specific requirements**: Note any OS-dependent configurations (e.g., specific Linux package dependencies in `apt` or `yum`).
-
-2. **Test Execution Information**
-   - **Precise test commands**: Focus on specific commands or instructions for running individual tests or specific test files, not just commands for running all tests. Look for test commands in documentation like `README.md`, `CONTRIBUTING.md`, `tests/README.md`, etc.
-   - **CI/CD configurations**: Look into files like `.github/workflows/`, `.ci.yml`, `travis.yml`, or other pipeline configuration files that might include commands for running tests or specific test environments.
-   - **Test execution in context**: Extract any specific instructions about running tests, such as flags for specific test cases, test suites, or environments. Also, pay attention to dependencies relevant to testing like test frameworks (e.g., `pytest`, `JUnit`, `Mocha`) and their versions.
-
-3. **Organize Results for other agents**
-   - Present findings in a structured way so they can be used to generate the Dockerfile and evaluation script accurately. The **final report** should:
-     - Highlight the **specific versions** of dependencies, libraries, and testing tools.
-     - Include **commands** for setup and testing (e.g., `pip install`, `npm install`, `pytest`).
-     - Note any environment variables or configuration details relevant to the environment setup and test execution.
-     - Provide clear, concise, and actionable information, making it easier for other agents to proceed with resolving any setup or test execution issues.
-
-### Important Notes:
-- The repository has already been **cloned locally**; you are working within the local repository directory.  
-- You are **not expected to search broadly**; retrieve only the files and information explicitly requested by the calling agent.  
-- Avoid redundant or speculative searches—**be goal-driven and cost-efficient**.  
-- It is **common for this benchmark that no tests or test configs exist in the repo**. If you do not find tests, **state that clearly and stop searching**. Do **not** keep hunting for `pytest.ini`, `tox.ini`, or `conftest.py` after an initial check.
-"""
-
-
-USER_PROMPT = (
-        "Your task is to gather sufficient context from the repository and external sources to understand how to set up the project's environment. To achieve this, you can use the following APIs to browse and extract relevant information:"
-        "\n- browse_folder(path: str, depth: str): Browse and return the folder structure for a given path in the repository.  The depth is a string representing a number of folder levels to include in the output such as ``1''. "
-        "\n- browse_file_for_environment_info(file_path: str, custom_query: str): Call an agent to browse a file such as README or CONTRIBUTING.md and extract environment setup and running tests information. Use the `custom_query` parameter to tell the agent any extra details it should pay special attention to (for example, 'what java version do we need?')."
-        "\n- search_files_by_keyword(keyword: str): Search for files in the repository whose names contain the given keyword."
-        "\n\nYou may invoke multiple APIs in one round as needed to gather the required information."
-        "\n\nNow analyze the repository and use the necessary APIs to gather the information required to understand and set up the environment. If you cannot find tests or test configs after a quick, minimal check, report that and stop. Ensure each API call has concrete arguments as inputs."
-        )
+# Prompts are defined in app/prompts/prompts.py and imported at the top of this file.
+# SYSTEM_PROMPT and USER_PROMPT are aliased here for backwards compatibility.
+SYSTEM_PROMPT = CONTEXT_RETRIEVAL_SYSTEM_PROMPT
+USER_PROMPT = CONTEXT_RETRIEVAL_USER_PROMPT

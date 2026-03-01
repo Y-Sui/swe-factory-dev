@@ -3,7 +3,7 @@ from app.agents.context_retrieval_agent import context_retrieval_utils
 import inspect
 import json
 from app.agents.agent import Agent
-from app.task import Task
+from app.task import SweTask
 import os
 from loguru import logger
 from os.path import join as pjoin
@@ -20,7 +20,7 @@ from app.utils import parse_function_invocation
 class ContextRetrievalAgent(Agent):
    
     api_functions: list[str] = ["browse_folder","search_files_by_keyword","browse_file_for_environment_info"]
-    def __init__(self,  task: Task, output_dir: str, repo_basic_info: str, max_context_retrieval_round: int =10):
+    def __init__(self, task: SweTask, output_dir: str, repo_basic_info: str, max_context_retrieval_round: int = 10):
         super().__init__(agent_id="ContextRetrievalAgent")
         self.msg_thread  = MessageThread()
         self.task = task
