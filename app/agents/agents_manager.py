@@ -1,6 +1,6 @@
-from app.data_structures import MessageThread
-from app.task import Task
+from app.task import SweTask
 from app.agents.write_dockerfile_agent import WriteDockerfileAgent
+from app.agents.write_dockerfile_agent.write_dockerfile_utils import get_repo_env_template, get_base_image_for_repo
 from app.agents.test_analysis_agent import TestAnalysisAgent
 from app.agents.write_eval_script_agent import WriteEvalScriptAgent
 from app.agents.context_retrieval_agent import ContextRetrievalAgent
@@ -12,132 +12,95 @@ from datetime import datetime
 from app.model import common
 from os.path import join as pjoin
 from loguru import logger
-from packaging import version
 import json
-import random
-from filelock import FileLock
 from copy import deepcopy
+from filelock import FileLock
 
 DIFF_MODIFIED_FILE_REGEX = r"--- a/(.*)"
 DIFF_DEVNULL_REGEX = r"--- /dev/null\n\+\+\+ b/(.*)"
-def normalize_version(ver_str):
-    match = re.search(r"(\d+(?:\.\d+){0,2})", ver_str)
-    return match.group(1) if match else ver_str
 
-def get_closest_version_info(records, repo, target_version):
-    same_repo = [r for r in records if r.get('repo') == repo]
-    if not same_repo:
-        return None
-    ver_map = {r['version']: normalize_version(r['version']) for r in same_repo}
-    try:
-        sorted_list = sorted(same_repo, key=lambda r: version.parse(ver_map[r['version']]))
-        target_parsed = version.parse(normalize_version(target_version))
-    except Exception:
-        sorted_list = sorted(same_repo, key=lambda r: r['version'])
-        target_parsed = version.parse(normalize_version(target_version))
-    exact_matches = [r for r in same_repo if r['version'] == target_version]
-    if exact_matches:
-        return random.choice(exact_matches)
-    candidates = [r for r in sorted_list if version.parse(ver_map[r['version']]) <= target_parsed]
-    return random.choice(candidates) if candidates else None
 
 class AgentsManager:
     """
-    Simple manager to orchestrate LLM-based agents.
+    Orchestrates the agent workflow: ContextRetrieval → Dockerfile → WriteTest → EvalScript → TestAnalysis.
     """
-    def __init__(self, 
-                task: Task, 
-                output_dir: str,
-                client: docker.DockerClient, 
-                start_time: datetime, 
-                max_iteration_num: int,
-                results_path:str,
-                disable_memory_pool:bool,
-                disable_context_retrieval:bool,
-                disable_run_test:bool,
-                disable_download_test_resources:bool,
-                using_ubuntu_only:bool,
-                ):
+    def __init__(
+        self,
+        task: SweTask,
+        output_dir: str,
+        client: docker.DockerClient,
+        start_time: datetime,
+        max_iteration_num: int,
+        results_path: str,
+        disable_run_test: bool,
+    ):
         self.task = task
         self.output_dir = os.path.abspath(output_dir)
-        self.run_count = 0
         self.client = client
-        self.max_iteration_num  = max_iteration_num
+        self.max_iteration_num = max_iteration_num
         self.start_time = start_time
-        
+        self.workflow_finish_status = False
+
+        # Auto-populate base_image from repo name mapping if not already set
+        if not getattr(task, "base_image", None):
+            task.base_image = get_base_image_for_repo(task.repo_name)
+
         self.test_files = self.get_test_files()
         self.repo_basic_info = self.get_repository_basic_info()
-        self.workflow_finish_status  = False
-        # Initialize agents
+
         self.agents_dict = {
-            "write_docker_agent": WriteDockerfileAgent(task, output_dir, self.repo_basic_info,using_ubuntu_only),
-            "write_eval_script_agent": WriteEvalScriptAgent(task, output_dir, self.repo_basic_info,disable_download_test_resources),
+            "write_docker_agent": WriteDockerfileAgent(task, output_dir, self.repo_basic_info),
+            "write_eval_script_agent": WriteEvalScriptAgent(task, output_dir, self.repo_basic_info),
             "test_analysis_agent": TestAnalysisAgent(task, output_dir, self.repo_basic_info, client),
             "context_retrieval_agent": ContextRetrievalAgent(task, output_dir, self.repo_basic_info),
         }
-        self.set_agent_status('all',False)
-        self.needs_test_generation = len(self.test_files) < 3
+        self.set_agent_status("all", False)
+
+        # Always generate tests for our repos (test_patch is empty or has fewer than 3 files)
+        self.needs_test_generation = (
+            not (self.task.test_patch or "").strip() or len(self.test_files) < 3
+        )
         if self.needs_test_generation:
             self.agents_dict["write_test_agent"] = WriteTestAgent(task, output_dir, self.repo_basic_info)
             self.set_agent_status("write_test_agent", False)
-        self.disable_memory_pool = disable_memory_pool
-        self.disable_context_retrieval = disable_context_retrieval
-        self.disable_run_test = disable_run_test
-        self.disable_download_test_resources = disable_download_test_resources
-        if disable_context_retrieval:
-            self.set_agent_status("context_retrieval_agent",True)
-        self.agents_dict['test_analysis_agent'].disable_context_retrieval= disable_context_retrieval
-        self.agents_dict['test_analysis_agent'].disable_run_test = disable_run_test
-        self.results_file = f'{results_path}/results.json'
-        lock_path = self.results_file + '.lock'
+
+        self.agents_dict["test_analysis_agent"].disable_run_test = disable_run_test
+
+        self.results_file = f"{results_path}/results.json"
+        lock_path = self.results_file + ".lock"
         self.lock = FileLock(lock_path, timeout=30)
         with self.lock:
             if not os.path.exists(self.results_file):
-                with open(self.results_file, 'w') as f:
+                with open(self.results_file, "w") as f:
                     json.dump([], f, indent=2)
 
     def set_agent_status(self, agent_name: str, status: bool):
-        """Set the status of an agent to control if it's active or inactive."""
-        if agent_name == 'all':
-            for agent_key, agent_value in self.agents_dict.items():
-                agent_value.finish_status = status  
-
+        if agent_name == "all":
+            for agent in self.agents_dict.values():
+                agent.finish_status = status
         elif agent_name in self.agents_dict:
-            agent = self.agents_dict[agent_name]
-            agent.finish_status = status  
+            self.agents_dict[agent_name].finish_status = status
         else:
             logger.error(f"Agent {agent_name} not found!")
 
     def get_agent_status(self, agent_name: str) -> bool:
-        """Get the current status of an agent."""
         if agent_name in self.agents_dict:
             return self.agents_dict[agent_name].finish_status
-        else:
-            logger.error(f"Agent {agent_name} not found!")
-            return False
+        logger.error(f"Agent {agent_name} not found!")
+        return False
 
     def set_agents_iteration_num(self, iteration_num: int) -> None:
-        """Get the current status of an agent."""
-        for agent_key, agent_value in self.agents_dict.items():
-            
-            agent_value.iteration_num = iteration_num 
-            
+        for agent in self.agents_dict.values():
+            agent.iteration_num = iteration_num
+
     def get_test_files(self) -> list[str]:
-        """
-        1) Extract modified/deleted files via '--- a/...'
-        2) Extract newly added files via the '/dev/null' pattern
-        3) Return combined list in patch order (no dedup)
-        """
         patch = self.task.test_patch or ""
-
         old_paths = re.findall(DIFF_MODIFIED_FILE_REGEX, patch)
-        new_paths = re.findall(DIFF_DEVNULL_REGEX,   patch)
-
-        # simply concatenate; if duplicates truly don't happen, this is fine
+        new_paths = re.findall(DIFF_DEVNULL_REGEX, patch)
         return old_paths + new_paths
-    
+
     def get_repository_basic_info(self) -> str:
-        return (
+        base = (
             f"Target repository name: {self.task.repo_name}\n"
             f"Commit SHA: {self.task.commit}\n"
             f"Version: {self.task.version}\n"
@@ -145,25 +108,20 @@ class AgentsManager:
             + "\n".join(self.test_files)
             + "\n"
         )
+        template = get_repo_env_template(self.task.repo_name)
+        if template:
+            base += f"\n{template}"
+        return base
 
-    def dump_cost(
-        self
-    ):
-        start_time = self.start_time
+    def dump_cost(self):
         end_time = datetime.now()
-        task_output_dir = self.output_dir
-        project_path  = self.task.project_path
-      
-        model_stats = common.SELECTED_MODEL.get_overall_exec_stats()
         stats = {
-            # "commit": commit_hash,
-            "start_epoch": start_time.timestamp(),
+            "start_epoch": self.start_time.timestamp(),
             "end_epoch": end_time.timestamp(),
-            "elapsed_seconds": (end_time - start_time).total_seconds(),
+            "elapsed_seconds": (end_time - self.start_time).total_seconds(),
         }
-        stats.update(model_stats)
-
-        with open(pjoin(task_output_dir, "cost.json"), "w") as f:
+        stats.update(common.SELECTED_MODEL.get_overall_exec_stats())
+        with open(pjoin(self.output_dir, "cost.json"), "w") as f:
             json.dump(stats, f, indent=4)
 
     def _read_results(self) -> list:
@@ -178,43 +136,41 @@ class AgentsManager:
                 json.dump(records, f, indent=2)
             os.replace(tmp, self.results_file)
 
-    def get_latest_reference_setup_for_repo(self):
-        records = self._read_results()
-        return get_closest_version_info(records, self.task.repo_name, self.task.version)
-
     def run_workflow(self) -> None:
         for iteration_num in range(self.max_iteration_num):
             self.set_agents_iteration_num(iteration_num)
-            
-            if self.disable_context_retrieval and iteration_num==0:
-              readme_content = self.agents_dict['context_retrieval_agent'].browse_readme()
-              if readme_content:
-                  self.agents_dict['write_eval_script_agent'].add_user_message(readme_content)
-                  self.agents_dict['write_docker_agent'].add_user_message(readme_content)
-            
 
+            # Step 1: Context retrieval
             if not self.get_agent_status("context_retrieval_agent"):
-                collected_information, summary, success =  self.agents_dict['context_retrieval_agent'].run_task()
+                collected_information, _, _ = self.agents_dict["context_retrieval_agent"].run_task()
                 self.dump_cost()
-                if collected_information != None:
-                    self.set_agent_status("context_retrieval_agent",True)
-                    self.agents_dict['write_eval_script_agent'].add_user_message(collected_information)
-                    self.agents_dict['write_docker_agent'].add_user_message(collected_information)
+                if collected_information is not None:
+                    self.set_agent_status("context_retrieval_agent", True)
+                    self.agents_dict["write_eval_script_agent"].add_user_message(collected_information)
+                    self.agents_dict["write_docker_agent"].add_user_message(collected_information)
                     if self.needs_test_generation:
-                        self.agents_dict['write_test_agent'].add_user_message(collected_information)
+                        self.agents_dict["write_test_agent"].add_user_message(collected_information)
 
-            # Run WriteTestAgent if test_patch is empty and context retrieval is done
-            if self.needs_test_generation and self.get_agent_status("context_retrieval_agent") \
-                    and not self.get_agent_status("write_test_agent"):
-                _, _, success = self.agents_dict['write_test_agent'].run_task()
+            # Step 2: Dockerfile generation
+            if self.get_agent_status("context_retrieval_agent") and not self.get_agent_status("write_docker_agent"):
+                _, _, success = self.agents_dict["write_docker_agent"].run_task()
+                self.dump_cost()
+                if success:
+                    self.set_agent_status("write_docker_agent", True)
+
+            # Step 3: Test generation (after Dockerfile is ready)
+            if (self.needs_test_generation
+                    and self.get_agent_status("context_retrieval_agent")
+                    and self.get_agent_status("write_docker_agent")
+                    and not self.get_agent_status("write_test_agent")):
+                _, _, success = self.agents_dict["write_test_agent"].run_task()
                 self.dump_cost()
                 if success:
                     self.set_agent_status("write_test_agent", True)
-                    # Inject generated test_patch into WriteEvalScriptAgent
-                    gen_patch = self.agents_dict['write_test_agent'].get_generated_test_patch()
-                    gen_files = self.agents_dict['write_test_agent'].get_generated_test_files()
-                    eval_agent = self.agents_dict['write_eval_script_agent']
-                    # Combine existing test_patch with generated patch
+                    write_test_agent: WriteTestAgent = self.agents_dict["write_test_agent"]  # type: ignore[assignment]
+                    gen_patch = write_test_agent.get_generated_test_patch()
+                    gen_files = write_test_agent.get_generated_test_files()
+                    eval_agent: WriteEvalScriptAgent = self.agents_dict["write_eval_script_agent"]  # type: ignore[assignment]
                     existing_patch = eval_agent.test_patch.strip()
                     if existing_patch:
                         eval_agent.test_patch = existing_patch + "\n" + gen_patch
@@ -225,185 +181,115 @@ class AgentsManager:
                     eval_agent.generated_test_files = gen_files
                     eval_agent.initial_skeleton = eval_agent.get_initial_eval_script_skeleton()
 
-            if self.disable_memory_pool == False:        
-                reference_setup = self.get_latest_reference_setup_for_repo()
-                if reference_setup:
-                    self.agents_dict['write_docker_agent'].reference_setup = reference_setup
-                    
-                    self.agents_dict['write_eval_script_agent'].reference_setup = reference_setup
-
-            if self.get_agent_status("context_retrieval_agent") and not self.get_agent_status("write_docker_agent"):
-                _, _, success =  self.agents_dict['write_docker_agent'].run_task()
+            # Step 4: Eval script generation
+            test_gen_ready = not self.needs_test_generation or self.get_agent_status("write_test_agent")
+            if (self.get_agent_status("context_retrieval_agent")
+                    and self.get_agent_status("write_docker_agent")
+                    and test_gen_ready
+                    and not self.get_agent_status("write_eval_script_agent")):
+                _docker_agent: WriteDockerfileAgent = self.agents_dict["write_docker_agent"]  # type: ignore[assignment]
+                _eval_agent: WriteEvalScriptAgent = self.agents_dict["write_eval_script_agent"]  # type: ignore[assignment]
+                _eval_agent.dockerfile = _docker_agent.get_latest_dockerfile()
+                _, _, success = _eval_agent.run_task()
                 self.dump_cost()
                 if success:
-                    self.set_agent_status("write_docker_agent",True)
-          
+                    self.set_agent_status("write_eval_script_agent", True)
 
-            test_gen_ready = (not self.needs_test_generation or self.get_agent_status("write_test_agent"))
-            if self.get_agent_status("context_retrieval_agent") and self.get_agent_status("write_docker_agent") \
-                    and test_gen_ready and not self.get_agent_status("write_eval_script_agent"):
-                self.agents_dict['write_eval_script_agent'].dockerfile =  self.agents_dict['write_docker_agent'].get_latest_dockerfile()
-                _, _, success =  self.agents_dict['write_eval_script_agent'].run_task()
+            # Step 5: Test analysis
+            if (self.get_agent_status("context_retrieval_agent")
+                    and self.get_agent_status("write_docker_agent")
+                    and self.get_agent_status("write_eval_script_agent")):
+                _docker_agent2: WriteDockerfileAgent = self.agents_dict["write_docker_agent"]  # type: ignore[assignment]
+                _eval_agent2: WriteEvalScriptAgent = self.agents_dict["write_eval_script_agent"]  # type: ignore[assignment]
+                _analysis_agent: TestAnalysisAgent = self.agents_dict["test_analysis_agent"]  # type: ignore[assignment]
+                _analysis_agent.dockerfile = _docker_agent2.get_latest_dockerfile()
+                _analysis_agent.eval_script_skeleton = _eval_agent2.get_latest_eval_script_skeleton()
+                _analysis_agent.eval_script = _eval_agent2.get_latest_eval_script() or ""
+
+                analysis, _, success = _analysis_agent.run_task()
                 self.dump_cost()
-                if success:
-                    self.set_agent_status("write_eval_script_agent",True)
-                
-            if self.get_agent_status("context_retrieval_agent") and self.get_agent_status("write_docker_agent") and self.get_agent_status("write_eval_script_agent"):
-                dockerfile = self.agents_dict['write_docker_agent'].get_latest_dockerfile()
-                eval_script_skeleton = self.agents_dict['write_eval_script_agent'].get_latest_eval_script_skeleton()
-                eval_script= self.agents_dict['write_eval_script_agent'].get_latest_eval_script()
-                self.agents_dict['test_analysis_agent'].dockerfile = dockerfile
-                self.agents_dict['test_analysis_agent'].eval_script_skeleton = eval_script_skeleton
-                self.agents_dict['test_analysis_agent'].eval_script = eval_script
-                # analysis, _, success =  self.agents_dict['test_analysis_agent'].run_task()
-              
-                if self.disable_run_test:
-                    
-                    analysis, _, success =  self.agents_dict['test_analysis_agent'].run_task_without_run_test()
-                else:
-                    analysis, _, success =  self.agents_dict['test_analysis_agent'].run_task(self.disable_context_retrieval)
-                self.dump_cost()
+
                 if isinstance(analysis, str):
                     try:
                         analysis = json.loads(analysis)
-                    except:
+                    except (json.JSONDecodeError, ValueError, TypeError):
                         analysis = {}
-                else:
+                elif not isinstance(analysis, dict):
                     analysis = {}
 
+                if analysis.get("is_finish"):
+                    self.workflow_finish_status = True
+                    break
 
-                is_finish = analysis.get("is_finish", None)
+                # Route feedback to agents
+                guidance = analysis.get("guidance_for_context_retrieval_agent")
+                if guidance:
+                    self.set_agent_status("context_retrieval_agent", False)
+                    self.agents_dict["context_retrieval_agent"].add_user_message(
+                        f"The test analysis agent found additional context is needed:\n{guidance}\n\n"
+                    )
 
-                # F2P safety gate: only accept is_finish=True if F2P is FAIL2PASS
-                test_analysis_agent = self.agents_dict['test_analysis_agent']
-                f2p = getattr(test_analysis_agent, 'f2p_classification', None)
+                guidance = analysis.get("guidance_for_write_dockerfile_agent")
+                if guidance:
+                    self.set_agent_status("write_docker_agent", False)
+                    dockerfile_agent: WriteDockerfileAgent = self.agents_dict["write_docker_agent"]  # type: ignore[assignment]
+                    dockerfile_agent.pending_guidance = (dockerfile_agent.pending_guidance or "") + (
+                        f"The test analysis agent found a problem with the Dockerfile:\n{guidance}\n\n"
+                    )
 
-                if is_finish:
-                    if self.disable_run_test:
-                        # No Docker = no F2P data, accept LLM judgment
-                        self.workflow_finish_status = True
-                        break
-                    elif f2p == "FAIL2PASS":
-                        self.workflow_finish_status = True
-                        break
-                    else:
-                        # Override: LLM says finish but F2P disagrees
-                        logger.info(f"F2P safety gate: LLM said is_finish=True but F2P={f2p}. Overriding.")
-                        is_finish = False
-                        if f2p == "PASS2PASS":
-                            # Tests too weak — route to write_test_agent
-                            if self.needs_test_generation and "write_test_agent" in self.agents_dict:
-                                self.set_agent_status("write_test_agent", False)
-                                self.set_agent_status("write_eval_script_agent", False)
-                                self.agents_dict['write_test_agent'].add_user_message(
-                                    "F2P validation shows PASS2PASS: tests pass even without the gold patch. "
-                                    "The tests do not capture the bug. Please strengthen the tests so they "
-                                    "fail on the unfixed code.\n\n")
-                        elif f2p == "FAIL2FAIL":
-                            # Environment issue — route to dockerfile + eval script agents
-                            self.set_agent_status("write_docker_agent", False)
-                            self.set_agent_status("write_eval_script_agent", False)
-                            self.agents_dict['write_docker_agent'].add_user_message(
-                                "F2P validation shows FAIL2FAIL: tests fail both with and without the gold patch. "
-                                "There is likely an environment or test setup issue. Please review and fix.\n\n")
-                            self.agents_dict['write_eval_script_agent'].add_user_message(
-                                "F2P validation shows FAIL2FAIL: tests fail both with and without the gold patch. "
-                                "There is likely an environment or test setup issue. Please review and fix.\n\n")
-                        elif f2p == "PASS2FAIL":
-                            # Tests broken/inverted — route to write_test_agent
-                            if self.needs_test_generation and "write_test_agent" in self.agents_dict:
-                                self.set_agent_status("write_test_agent", False)
-                                self.set_agent_status("write_eval_script_agent", False)
-                                self.agents_dict['write_test_agent'].add_user_message(
-                                    "F2P validation shows PASS2FAIL: tests pass without the gold patch but fail with it. "
-                                    "The tests are broken or inverted. Please fix the test logic.\n\n")
+                guidance = analysis.get("guidance_for_write_eval_script_agent")
+                if guidance:
+                    self.set_agent_status("write_eval_script_agent", False)
+                    eval_agent: WriteEvalScriptAgent = self.agents_dict["write_eval_script_agent"]  # type: ignore[assignment]
+                    eval_agent.pending_guidance = (eval_agent.pending_guidance or "") + (
+                        f"The test analysis agent found a problem with the eval script:\n{guidance}\n\n"
+                    )
 
-                if not is_finish:
-                    # Soft fallback: if disable_run_test and we've done at least one full
-                    # round of analysis+feedback, accept existing artifacts rather than
-                    # looping endlessly with speculative LLM requests.
-                    if self.disable_run_test and iteration_num >= 1:
-                        _df = self.agents_dict['write_docker_agent'].get_latest_dockerfile()
-                        _es = self.agents_dict['write_eval_script_agent'].get_latest_eval_script()
-                        if _df and _es:
-                            logger.info(
-                                "disable_run_test soft fallback: iteration_num={}, "
-                                "artifacts exist — accepting completion.".format(iteration_num)
-                            )
-                            self.workflow_finish_status = True
-                            break
-
-                    # scheduler
-                    guidance_for_context_retrieval_agent = analysis.get("guidance_for_context_retrieval_agent", None)
-                    if guidance_for_context_retrieval_agent:
-                        if self.disable_run_test ==False:
-                            prefix_prompt = "After setting up dockerfile and running tests, the test log analysis agent find that there is other context information need to collect. Here is his analysis:\n"
-                        else:
-                            prefix_prompt = "After analysis, you need collect more information. Here is the analysis:\n"
-                        self.set_agent_status("context_retrieval_agent",False)
-                        self.agents_dict['context_retrieval_agent'].add_user_message(f'{prefix_prompt}{guidance_for_context_retrieval_agent}\n\n')
-
-                    guidance_for_write_dockerfile_agent = analysis.get("guidance_for_write_dockerfile_agent", None)
-                    if guidance_for_write_dockerfile_agent:
-                        if self.disable_run_test ==False:
-                            prefix_prompt = 'After setting up dockerfile and running tests, the test log analysis agent find that there is a problem with dockefile. Here is his analysis:\n'
-                        else:
-                            prefix_prompt = "After analysis, you need modify the dockerfile. Here is the analysis:\n"
-                        self.set_agent_status("write_docker_agent",False)
-                        self.agents_dict['write_docker_agent'].add_user_message(f'{prefix_prompt}{guidance_for_write_dockerfile_agent}\n\n')
-
-                    guidance_for_write_eval_script_agent = analysis.get("guidance_for_write_eval_script_agent", None)
-                    if guidance_for_write_eval_script_agent:
-                        if self.disable_run_test ==False:
-                            prefix_prompt = 'After setting up dockerfile and running tests, the test log analysis agent find that there is a problem with eval script. Here is his analysis:\n'
-                        else:
-                            prefix_prompt = "After analysis, you need modify the eval script. Here is the analysis:\n"
-                        self.set_agent_status("write_eval_script_agent",False)
-                        self.agents_dict['write_eval_script_agent'].add_user_message(f'{prefix_prompt}{guidance_for_write_eval_script_agent}\n\n')
-
-                    guidance_for_write_test_agent = analysis.get("guidance_for_write_test_agent", None)
-                    if guidance_for_write_test_agent and self.needs_test_generation and "write_test_agent" in self.agents_dict:
-                        prefix_prompt = "After analysis, the generated tests need improvement. Here is the feedback:\n"
+                guidance = analysis.get("guidance_for_write_test_agent")
+                if guidance:
+                    if "write_test_agent" not in self.agents_dict:
+                        self.needs_test_generation = True
+                        self.agents_dict["write_test_agent"] = WriteTestAgent(
+                            self.task, self.output_dir, self.repo_basic_info
+                        )
+                    if self.needs_test_generation:
                         self.set_agent_status("write_test_agent", False)
                         self.set_agent_status("write_eval_script_agent", False)
-                        self.agents_dict['write_test_agent'].add_user_message(
-                            f'{prefix_prompt}{guidance_for_write_test_agent}\n\n')
+                        test_agent: WriteTestAgent = self.agents_dict["write_test_agent"]  # type: ignore[assignment]
+                        test_agent.pending_guidance = (test_agent.pending_guidance or "") + (
+                            f"The generated tests need improvement:\n{guidance}\n\n"
+                        )
 
         else:
-            log_msg = "Exceed largest number of tries.."
-            logger.info(f"Too many rounds. {log_msg}")
+            logger.info("Too many rounds. Exceeded max_iteration_num.")
 
-        dockerfile_content = self.agents_dict['write_docker_agent'].get_latest_dockerfile()
-        eval_script_content = self.agents_dict['write_eval_script_agent'].get_latest_eval_script()
-        eval_script_skeleton_content = self.agents_dict['write_eval_script_agent'].get_latest_eval_script_skeleton()
+        # Save final outputs
+        _final_docker: WriteDockerfileAgent = self.agents_dict["write_docker_agent"]  # type: ignore[assignment]
+        _final_eval: WriteEvalScriptAgent = self.agents_dict["write_eval_script_agent"]  # type: ignore[assignment]
+        dockerfile_content = _final_docker.get_latest_dockerfile()
+        eval_script_content = _final_eval.get_latest_eval_script() or ""
+        eval_script_skeleton_content = _final_eval.get_latest_eval_script_skeleton()
+
         if dockerfile_content and eval_script_content:
-            with open(os.path.join(self.output_dir, "Dockerfile"), "w") as dockerfile_f:
-                dockerfile_f.write(dockerfile_content)
+            with open(os.path.join(self.output_dir, "Dockerfile"), "w") as f:
+                f.write(dockerfile_content)
+            with open(os.path.join(self.output_dir, "eval.sh"), "w") as f:
+                f.write(eval_script_content)
 
-        
-            with open(os.path.join(self.output_dir, "eval.sh"), "w") as eval_script_f:
-                eval_script_f.write(eval_script_content)
-
-
-        f2p_result = getattr(self.agents_dict.get('test_analysis_agent'), 'f2p_classification', None)
+        f2p_result = getattr(self.agents_dict.get("test_analysis_agent"), "f2p_classification", None)
         status_data = {"is_finish": self.workflow_finish_status}
         if f2p_result:
             status_data["f2p_classification"] = f2p_result
-        with open(os.path.join(self.output_dir, "status.json"), "w") as status_file_f:
-                json.dump(status_data, status_file_f)
+        with open(os.path.join(self.output_dir, "status.json"), "w") as f:
+            json.dump(status_data, f)
 
         if self.workflow_finish_status:
             recs = self._read_results()
             info = deepcopy(self.task.task_info)
-
-            # merge in your new fields
             info.update({
                 "dockerfile": dockerfile_content,
                 "eval_script": eval_script_content,
                 "eval_script_skeleton": eval_script_skeleton_content,
-                # keep any other existing keys from task_info
             })
-
             recs.append(info)
             self._write_results(recs)
-        

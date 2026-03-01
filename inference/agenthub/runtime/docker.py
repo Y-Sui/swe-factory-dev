@@ -1146,17 +1146,16 @@ class DockerRuntime(ExecutionEnvironment):
 
     def _calculate_reward_swefactory(self, get_test_output=False, timeout: int = 300) -> float:
         # calculate reward based for r2e-edit dockers
+        from swe_factory_utils import extract_exit_code
+
         output, error_code = self.run_tests(timeout=timeout)
-    
+
         reward = 0.0
 
-        EXIT_CODE_RE = re.compile(r"echo OMNIGRIL_EXIT_CODE=(\d)")
-
         if output:
-            match = EXIT_CODE_RE.search(output)
-            if match:
-                exit_code = match.group(1)
-                if exit_code == "0":
+            exit_code = extract_exit_code(output)
+            if exit_code is not None:
+                if exit_code == 0:
                     reward = 1.0
             else:
                 print(f"[WARN] No exit code found in test output ")

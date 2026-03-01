@@ -34,6 +34,8 @@ def register_all_models() -> None:
     common.register_model(gpt.DeepSeekV3())
     common.register_model(gpt.DeepSeek())
     common.register_model(gpt.Gpt4_1())
+    common.register_model(gpt.Gpt4_1_OpenRouter())
+    common.register_model(gpt.Grok4_Fast())
     common.register_model(gpt.Gpt4_1_mini())
     common.register_model(gpt.Gpt5_mini())
     common.register_model(gpt.Gemini_2_5_flash_preview())

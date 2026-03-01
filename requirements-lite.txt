@@ -12,6 +12,7 @@ tqdm>=4.66
 
 # Stage II: env setup (multi-agent Dockerfile + eval script generation)
 docker>=7.0
+python-dotenv>=1.0
 filelock>=3.13
 httpx>=0.27
 litellm>=1.44

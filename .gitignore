@@ -28,6 +28,7 @@ MANIFEST
 output*/
 testbed/
 data/
+internal-swe-bench-data
 evaluation/run_instance/
 evaluation/run_instance*
 # PyInstaller

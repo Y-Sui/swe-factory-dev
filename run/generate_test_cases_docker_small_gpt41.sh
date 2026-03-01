@@ -1,8 +1,8 @@
 #!/bin/bash
-# Small smoke test: run Stage II on a tiny subset of instances.
+# Small smoke test: run Stage II on a tiny subset of instances using gpt-4.1.
 #
 # Usage:
-#   cd swe-factory && bash run/generate_test_cases_docker_small.sh
+#   cd swe-factory && bash run/generate_test_cases_docker_small_gpt41.sh
 
 set -euo pipefail
 
@@ -15,8 +15,8 @@ export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 SCRIPT_DIR="data_collection/collect"
 DATA_DIR="../internal-swe-bench-data"
 SETUP_DIR="testbed"
-# MODEL="anthropic/claude-sonnet-4.5"
-MODEL="google/gemini-2.5-flash"
+MODEL="openai/gpt-4.1"
+MODEL_SLUG="gpt-4.1"
 ROUND=3
 NUM_PROCS=5
 MAX_INSTANCES=1
@@ -29,10 +29,9 @@ REPOS=(
 
 # Step 1: Add version info to instances (modifies file in-place)
 for REPO in "${REPOS[@]}"; do
-  # INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
   INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
   if [ -z "$INSTANCE_FILE" ]; then
-    echo "=== No instances_selected file found for $REPO, skipping ==="
+    echo "=== No instances_all file found for $REPO, skipping ==="
     continue
   fi
 
@@ -70,7 +69,7 @@ done
 for REPO in "${REPOS[@]}"; do
   TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
   if [ -z "$TASKS_MAP" ]; then continue; fi
-  OUT_DIR="$DATA_DIR/$REPO/setup_output_small"
+  OUT_DIR="$DATA_DIR/$REPO/setup_output_small_${MODEL_SLUG}"
   TASK_LIST="$OUT_DIR/task_list_small.txt"
   mkdir -p "$OUT_DIR" "$OUT_DIR/results"
 
@@ -100,7 +99,7 @@ PIDS=()
 for REPO in "${REPOS[@]}"; do
   TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
   if [ -z "$TASKS_MAP" ]; then continue; fi
-  OUT_DIR="$DATA_DIR/$REPO/setup_output_small"
+  OUT_DIR="$DATA_DIR/$REPO/setup_output_small_${MODEL_SLUG}"
   RESULT_DIR="$OUT_DIR/results"
   TASK_LIST="$OUT_DIR/task_list_small.txt"
 

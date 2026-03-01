@@ -546,8 +546,8 @@ def runagent_multiple(
                                 "docker_image"
                             ]
                         )
-                    except:
-                        print("error in jsonl file")
+                    except (json.JSONDecodeError, KeyError, ValueError) as e:
+                        print(f"error in jsonl file: {e}")
 
             ds_selected = [
                 ds_entry

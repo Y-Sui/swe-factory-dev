@@ -1,12 +1,14 @@
 """
-Prompts, patch summarizer, extraction logic, and retry loop for WriteTestAgent.
+Patch summarizer, extraction logic, reflexion loop, and retry logic
+for WriteTestAgent.
+
+All prompts live in app/prompts/prompts.py.
 """
 
 import json
 import os
 import re
 from collections.abc import Callable
-from copy import deepcopy
 from os.path import join as pjoin
 
 from loguru import logger
@@ -14,72 +16,22 @@ from loguru import logger
 from app.data_structures import MessageThread
 from app.log import print_acr, print_patch_generation
 from app.model import common
-from app.task import Task
+from app.prompts.prompts import (
+    get_test_system_prompt,
+    TEST_USER_PROMPT,
+    TEST_REFLEXION_CRITIQUE_PROMPT,
+    TEST_REFLEXION_REFINE_PROMPT,
+)
+
+# Re-export for any callers that still reference write_test_utils directly
+USER_PROMPT_WRITE_TEST = TEST_USER_PROMPT
+REFLEXION_CRITIQUE_PROMPT = TEST_REFLEXION_CRITIQUE_PROMPT
+REFLEXION_REFINE_PROMPT = TEST_REFLEXION_REFINE_PROMPT
 
 
-SYSTEM_PROMPT_WRITE_TEST = """You are an expert software testing engineer. Your task is to generate Python test files that verify the changes described in a pull request.
-
-You will receive:
-- **Problem statement**: The description of the issue or feature being addressed.
-- **Patch content**: The code changes (unified diff) made to resolve the issue.
-- **Repository info**: Basic information about the target repository.
-- **Guidance** (if available): Feedback from a test analysis agent on how to improve previously generated tests.
-
-### Your Responsibilities:
-1. Analyze the problem statement and patch to understand what behavior changed.
-2. Write pytest-compatible test files that specifically test the changed behavior.
-3. Include both positive tests (verifying the fix works) and negative tests (verifying the old broken behavior is gone) where appropriate.
-4. Tests should be focused, minimal, and deterministic — avoid testing unrelated functionality.
-5. Import paths and module names must match the repository structure shown in the patch.
-
-### Output Format:
-Return your generated tests as a unified diff that creates new test files. Wrap the diff in `<test_patch>` tags.
-
-The diff must:
-- Use `diff --git` format with `/dev/null` as the `a/` side (since these are new files)
-- Include proper `---` and `+++` headers
-- Include `@@ -0,0 +1,N @@` hunk headers
-
-Example:
-<test_patch>
-diff --git a/dev/null b/tests/test_fix_issue.py
---- /dev/null
-+++ b/tests/test_fix_issue.py
-@@ -0,0 +1,25 @@
-+import pytest
-+from mymodule import my_function
-+
-+
-+def test_my_function_returns_correct_value():
-+    result = my_function(42)
-+    assert result == expected_value
-+
-+
-+def test_my_function_handles_edge_case():
-+    result = my_function(0)
-+    assert result is not None
-</test_patch>
-"""
-
-
-USER_PROMPT_WRITE_TEST = """Generate test files for the following pull request.
-
-### Repository Info:
-{repo_info}
-
-### Problem Statement:
-{problem_statement}
-
-### Patch (code changes):
-{patch_content}
-
-### Existing Tests (if any):
-{existing_tests}
-
-Based on the above, generate pytest-compatible test file(s) as a unified diff wrapped in `<test_patch>` tags.
-Focus on testing the specific behavior changes introduced by the patch. If existing tests are provided, generate **additional** complementary tests that cover cases not already tested — do NOT duplicate existing test coverage. Make sure test file paths are reasonable for the repository structure (e.g., `tests/test_*.py` or similar conventions visible in the patch paths).
-"""
-
+# ---------------------------------------------------------------------------
+# Patch summarizer
+# ---------------------------------------------------------------------------
 
 def summarize_large_patch(patch: str, max_chars: int = 15000) -> str:
     """For patches >max_chars, extract per-file hunk headers + key changed lines."""
@@ -93,12 +45,10 @@ def summarize_large_patch(patch: str, max_chars: int = 15000) -> str:
     for chunk in chunks:
         if not chunk.strip():
             continue
-        # Small chunks: include verbatim
         if len(chunk) <= 2000:
             summarized_parts.append(chunk)
             total_chars += len(chunk)
         else:
-            # Extract header + hunk headers + first few changed lines per hunk
             lines = chunk.splitlines(keepends=True)
             kept_lines = []
             in_hunk = False
@@ -129,6 +79,10 @@ def summarize_large_patch(patch: str, max_chars: int = 15000) -> str:
     return ''.join(summarized_parts)
 
 
+# ---------------------------------------------------------------------------
+# Test patch extraction
+# ---------------------------------------------------------------------------
+
 def extract_test_patch_from_response(res_text: str, output_dir: str) -> tuple[str | None, list[str]]:
     """Extract test patch from LLM response. Returns (patch_str, test_file_list)."""
     patch_content = None
@@ -138,7 +92,6 @@ def extract_test_patch_from_response(res_text: str, output_dir: str) -> tuple[st
     for content in matches:
         clean = content.strip()
         if clean:
-            # Strip wrapping ```diff ... ``` if present
             lines = clean.splitlines()
             if len(lines) >= 2 and '```' in lines[0] and '```' in lines[-1]:
                 lines = lines[1:-1]
@@ -159,17 +112,14 @@ def extract_test_patch_from_response(res_text: str, output_dir: str) -> tuple[st
     if not patch_content:
         return None, []
 
-    # Ensure it starts with diff --git
     idx = patch_content.find('diff --git')
     if idx > 0:
         patch_content = patch_content[idx:]
     elif idx < 0:
         return None, []
 
-    # Extract test file paths from +++ b/... lines
     test_files = re.findall(r'\+\+\+ b/(.*)', patch_content)
 
-    # Save the generated patch
     os.makedirs(output_dir, exist_ok=True)
     patch_path = pjoin(output_dir, "generated_test_patch.diff")
     with open(patch_path, "w") as f:
@@ -178,6 +128,10 @@ def extract_test_patch_from_response(res_text: str, output_dir: str) -> tuple[st
     return patch_content, test_files
 
 
+# ---------------------------------------------------------------------------
+# Initial test generation with retries
+# ---------------------------------------------------------------------------
+
 def write_test_with_retries(
     msg_thread: MessageThread,
     output_dir: str,
@@ -185,7 +139,7 @@ def write_test_with_retries(
     print_callback: Callable[[dict], None] | None = None,
 ) -> tuple[str, str | None, list[str], bool]:
     """
-    Call LLM to generate test patch, with retries on failure.
+    Call LLM to generate test patch, with retries on format extraction failure.
     Returns (result_msg, patch_str, test_file_list, success).
     """
     new_thread = msg_thread
@@ -208,21 +162,20 @@ def write_test_with_retries(
 
         raw_output_file = pjoin(output_dir, f"agent_write_test_raw_{i}")
 
-        # Call the model
-        res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg())
+        try:
+            res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg())
+        except Exception as e:
+            logger.error(f"LLM call failed in test generation try {i}: {e}")
+            continue
         new_thread.add_model(res_text, [])
 
         logger.info(f"Raw test generation output produced in try {i}. Writing to file.")
         with open(raw_output_file, "w") as f:
             f.write(res_text)
 
-        print_patch_generation(
-            res_text, f"test gen try {i} / {retries}", print_callback=print_callback
-        )
+        print_patch_generation(res_text, f"test gen try {i} / {retries}", print_callback=print_callback)
 
-        # Try to extract the test patch
         patch_content, test_files = extract_test_patch_from_response(res_text, output_dir)
-
         can_stop = patch_content is not None and len(test_files) > 0
 
         if can_stop:
@@ -238,3 +191,87 @@ def write_test_with_retries(
         result_msg = 'Failed to generate test patch.'
 
     return result_msg, patch_content, test_files, can_stop
+
+
+# ---------------------------------------------------------------------------
+# Reflexion: multi-round self-critique and refinement
+# ---------------------------------------------------------------------------
+
+def refine_tests_with_reflexion(
+    msg_thread: MessageThread,
+    generated_patch: str,
+    problem_statement: str,
+    code_patch: str,
+    output_dir: str,
+    max_rounds: int = 2,
+    print_callback: Callable[[dict], None] | None = None,
+) -> tuple[str, list[str]]:
+    """
+    Run multi-round reflexion to improve generated tests.
+
+    Each round:
+      1. Critique the current test patch.
+      2. If "TESTS_APPROVED" in critique, stop early.
+      3. Otherwise, refine based on critique.
+
+    Returns (refined_patch, refined_test_files).
+    """
+    current_patch = generated_patch
+    current_files = re.findall(r'\+\+\+ b/(.*)', current_patch)
+
+    for round_num in range(1, max_rounds + 1):
+        round_dir = pjoin(output_dir, f"reflexion_round_{round_num}")
+        os.makedirs(round_dir, exist_ok=True)
+
+        critique_prompt = TEST_REFLEXION_CRITIQUE_PROMPT.format(
+            problem_statement=summarize_large_patch(problem_statement, 5000),
+            patch_content=summarize_large_patch(code_patch),
+            test_patch=current_patch,
+        )
+        msg_thread.add_user(critique_prompt)
+
+        try:
+            critique_text, *_ = common.SELECTED_MODEL.call(msg_thread.to_msg())
+        except Exception as e:
+            logger.error(f"LLM call failed in reflexion critique round {round_num}: {e}")
+            break
+        msg_thread.add_model(critique_text, [])
+
+        with open(pjoin(round_dir, "critique.txt"), "w") as f:
+            f.write(critique_text)
+
+        logger.info(f"Reflexion round {round_num}: critique completed.")
+
+        if "TESTS_APPROVED" in critique_text:
+            logger.info(f"Reflexion round {round_num}: tests approved, stopping early.")
+            break
+
+        refine_prompt = TEST_REFLEXION_REFINE_PROMPT.format(
+            critique=critique_text,
+            test_patch=current_patch,
+            problem_statement=summarize_large_patch(problem_statement, 5000),
+            patch_content=summarize_large_patch(code_patch),
+        )
+        msg_thread.add_user(refine_prompt)
+
+        try:
+            refined_text, *_ = common.SELECTED_MODEL.call(msg_thread.to_msg())
+        except Exception as e:
+            logger.error(f"LLM call failed in reflexion refine round {round_num}: {e}")
+            break
+        msg_thread.add_model(refined_text, [])
+
+        with open(pjoin(round_dir, "refinement_raw.txt"), "w") as f:
+            f.write(refined_text)
+
+        refined_patch, refined_files = extract_test_patch_from_response(refined_text, round_dir)
+
+        if refined_patch and len(refined_files) > 0:
+            current_patch = refined_patch
+            current_files = refined_files
+            logger.info(f"Reflexion round {round_num}: refined to {len(refined_files)} file(s).")
+        else:
+            logger.warning(f"Reflexion round {round_num}: failed to extract refined patch, keeping previous version.")
+            break
+
+    return current_patch, current_files

@@ -40,13 +40,11 @@ def copy_to_container(container: Container, src: Path, dst: Path):
     # Make directory if necessary
     container.exec_run(f"mkdir -p {dst.parent}")
 
-    # Send tar file to container and extract
+    # Send tar file to container (put_archive extracts automatically)
     container.put_archive(os.path.dirname(dst), data)
-    container.exec_run(f"tar -xf {dst}.tar -C {dst.parent}")
 
-    # clean up in locally and in container
+    # clean up locally
     tar_path.unlink()
-    container.exec_run(f"rm {dst}.tar")
 
 
 def write_to_container(container: Container, data: str, dst: Path):
@@ -327,7 +325,7 @@ def build_container(client,test_image_name,test_container_name,instance_id,run_t
         try:
     
             run_test_logger.info(f"Checking if image {test_image_name} exists locally...")
-            client.images.get(test_image_name)  # 如果本地没有镜像，会抛出 ImageNotFound
+            client.images.get(test_image_name)  # Raises ImageNotFound if not present locally
             run_test_logger.info(f"Image {test_image_name} found locally.")
             # Create the container
             run_test_logger.info(f"Creating container for {instance_id}...")

@@ -15,6 +15,8 @@ from app.log import log_and_print
 from docker import DockerClient
 
 class Task(ABC):
+    task_id: str
+
     @property
     @abstractmethod
     def project_path(self) -> str:
@@ -58,6 +60,7 @@ class SweTask(Task):
     version: str
     client: DockerClient
     task_info: dict
+    base_image: str | None = None  # pre-built base image for this repo (multi-layer build)
     @property
     def project_path(self) -> str:
         return self.repo_path

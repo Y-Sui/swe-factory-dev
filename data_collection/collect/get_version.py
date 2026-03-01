@@ -67,10 +67,8 @@ def prepare_repo_cache(tasks: List[Dict], cache_dir: str, token: str = None) -> 
         repo = task["repo"]
         if repo in repo_cache:
             continue
-        if token:
-            repo_url = f"https://x-access-token:{token}@github.com/{repo}.git"
-        else:
-            repo_url = f"https://github.com/{repo}.git"
+        from swe_factory_utils import inject_github_token
+        repo_url = inject_github_token(f"https://github.com/{repo}.git")
         local_path = os.path.join(cache_dir, repo.replace("/", "__"))
         if os.path.isdir(local_path):
             repo_cache[repo] = local_path
@@ -94,7 +92,7 @@ def process_repo_task(task: Dict, testbed: str, repo_cache: Dict[str, str]) -> D
         cached_repo = repo_cache.get(repo)
         if not cached_repo or not os.path.exists(cached_repo):
             raise RuntimeError(f"Missing cached repo for {repo}")
-        shutil.copytree(cached_repo, repo_dir, dirs_exist_ok=True)
+        shutil.copytree(cached_repo, repo_dir, symlinks=True, dirs_exist_ok=True)
         with cd(repo_dir):
             run_command(["git", "checkout", base_commit], capture_output=True)
         version = get_version_by_git(repo_dir)

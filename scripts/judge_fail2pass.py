@@ -1,24 +1,22 @@
 import os
-import re
+import sys
 import json
 import argparse
 import multiprocessing
+from pathlib import Path
 from tqdm import tqdm
 from dotenv import load_dotenv
-from openai import OpenAI
+
+# Ensure project root is on sys.path so swe_factory_utils is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from swe_factory_utils import extract_exit_code, classify_f2p
 
 # --- Configuration ---
 load_dotenv()  # Load environment variables from .env file
 
 PREV_FILE_NAME  = "test_output_prev_apply.txt"
 AFTER_FILE_NAME = "test_output_after_apply.txt"
-EXIT_CODE_RE    = re.compile(r"echo OMNIGRIL_EXIT_CODE=(\d+)")
-
-
-def extract_exit_code(content: str) -> int | None:
-    """Extracts the exit code from the content; returns None if not found."""
-    m = EXIT_CODE_RE.search(content)
-    return int(m.group(1)) if m else None
 
 
 def process_subdirectory(subdir):
@@ -34,22 +32,8 @@ def process_subdirectory(subdir):
     prev_exit  = extract_exit_code(prev_content)
     after_exit = extract_exit_code(after_content)
 
-    if prev_exit is None or after_exit is None:
-        return "error"
-
-    prev_fail = (prev_exit != 0)
-    after_pass = (after_exit == 0)
-
-    if prev_fail and after_pass:
-        return "fail2pass"
-    elif prev_fail and not after_pass:
-        return "fail2fail"
-    elif not prev_fail and after_pass:
-        return "pass2pass"
-    elif not prev_fail and not after_pass:
-        return "pass2fail"
-    else:
-        return "error"
+    result = classify_f2p(prev_exit, after_exit)
+    return result.lower()
 
 
 def classify_and_write_json(src_folder: str, output_json: str, processes: int):

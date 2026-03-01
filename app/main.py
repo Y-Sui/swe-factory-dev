@@ -8,6 +8,7 @@ import os
 import re
 import docker
 from argparse import ArgumentParser
+from dotenv import load_dotenv
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
@@ -29,7 +30,7 @@ from app.post_process import (
    
 )
 from app.raw_tasks import RawGithubTask, RawLocalTask, RawSweTask, RawTask
-from app.task import Task
+from app.task import Task, SweTask
 import multiprocessing
 import time
 
@@ -71,7 +72,15 @@ def get_args(
     return parser.parse_args(from_command_line_str.split())
 
 
+def get_github_clone_url(repo: str) -> str:
+    """Build a clone URL for a GitHub repo, using GITHUB_TOKEN if available for private repos."""
+    from swe_factory_utils import inject_github_token
+    return inject_github_token(f"https://github.com/{repo}.git")
+
+
 def main(args, subparser_dest_attr_name: str = "command"):
+    # Load .env file so GITHUB_TOKEN and API keys are available from local .env
+    load_dotenv()
 
     ## common options
     globals.output_dir = args.output_dir
@@ -100,15 +109,8 @@ def main(args, subparser_dest_attr_name: str = "command"):
     globals.setup_dir = args.setup_dir 
     
     globals.organize_output_only = args.organize_output_only
-    globals.results_path = args.results_path 
-    globals.disable_memory_pool = args.disable_memory_pool
+    globals.results_path = args.results_path
     globals.disable_run_test = args.disable_run_test
-    
-    globals.disable_context_retrieval= args.disable_context_retrieval
-
-    globals.disable_download_test_resources= args.disable_download_test_resources
-
-    globals.using_ubuntu_only = args.using_ubuntu_only
     
     subcommand = getattr(args, subparser_dest_attr_name)
     if subcommand == "swe-bench":
@@ -336,34 +338,10 @@ def add_task_related_args(parser: ArgumentParser) -> None:
     )
   
     parser.add_argument(
-        "--disable-memory-pool",
-        action="store_true",
-        default=False,
-        help="Enable layered code search.",
-    )
-    parser.add_argument(
         "--disable-run-test",
         action="store_true",
         default=False,
-        help="Enable layered code search.",
-    )
-    parser.add_argument(
-        "--disable-context-retrieval",
-        action="store_true",
-        default=False,
-        help="Enable layered code search.",
-    )
-    parser.add_argument(
-        "--disable-download-test-resources",
-        action="store_true",
-        default=False,
-        help="Enable layered code search.",
-    )
-    parser.add_argument(
-        "--using-ubuntu-only",
-        action="store_true",
-        default=False,
-        help="Enable layered code search.",
+        help="Skip Docker test execution (generate Dockerfile+eval.sh only).",
     )
     parser.add_argument(
         "--task-batch",
@@ -472,10 +450,11 @@ def make_swe_tasks(
         setup_info = {}
         task_info = tasks_map[task_id]
         task_start_time_s = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        repo_cache_name = f'{task_info['repo']}_cache'
+        repo_cache_name = f"{task_info['repo']}_cache"
         repo_cache_dir =  pjoin(setup_dir,repo_cache_name)
         if not os.path.isdir(repo_cache_dir):
-            github_link = f"https://github.com/{task_info['repo']}.git"
+            # Use token-authenticated URL for private repo support
+            github_link = get_github_clone_url(task_info['repo'])
             apputils.clone_repo_and_checkout(github_link, "", repo_cache_dir)
         else:
             # 可以在这里打印日志或直接跳过
@@ -717,11 +696,19 @@ def run_raw_task(
 
 
 def do_inference(
-    python_task: Task,
+    python_task: SweTask,
     task_output_dir: str,
     print_callback: Callable[[dict], None] | None = None,
 ) -> bool:
-    client = None if globals.disable_run_test else docker.from_env()
+    if globals.disable_run_test:
+        client = None
+    else:
+        try:
+            client = docker.from_env()
+        except Exception as e:
+            logger.warning(f"Docker is not available: {e}. Skipping test execution.")
+            client = None
+            globals.disable_run_test = True
     apputils.create_dir_if_not_exists(task_output_dir)
     # github_link = f'https://github.com/{python_task.repo_name}.git'
     commit_hash = python_task.commit
@@ -739,18 +726,15 @@ def do_inference(
 
     
     try:
-        agents_manager = AgentsManager(python_task, 
-                                        task_output_dir,
-                                        client,
-                                        start_time,
-                                        globals.conv_round_limit,
-                                        globals.results_path,
-                                        disable_memory_pool = globals.disable_memory_pool,
-                                        disable_context_retrieval= globals.disable_context_retrieval,
-                                        disable_run_test= globals.disable_run_test,
-                                        disable_download_test_resources = globals.disable_download_test_resources,
-                                        using_ubuntu_only = globals.using_ubuntu_only,
-                                        )
+        agents_manager = AgentsManager(
+            python_task,
+            task_output_dir,
+            client,
+            start_time,
+            globals.conv_round_limit,
+            globals.results_path,
+            disable_run_test=globals.disable_run_test,
+        )
         agents_manager.run_workflow()
         run_ok = True
         end_time = datetime.now()

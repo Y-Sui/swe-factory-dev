@@ -1,0 +1,37 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y \
+    git curl ca-certificates build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG GITHUB_TOKEN
+RUN git clone https://${GITHUB_TOKEN}@github.com/MiroMindAI/sd-torchtune.git /testbed
+WORKDIR /testbed
+
+# Install PyTorch CPU-only (no CUDA needed for unit tests)
+# torch 2.9.1 matches torchao 0.15.0's ABI (torchao 0.15 was built against 2.9.1)
+RUN pip install --no-cache-dir torch==2.9.1 torchvision --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir torchao==0.15.0
+
+# transformers: needed by miromind HF comparison tests
+RUN pip install --no-cache-dir transformers
+
+# TORCH_VERSION_AFTER_2_4 was removed from torchao; replace with the modern equivalent
+RUN sed -i 's/from torchao.utils import TORCH_VERSION_AFTER_2_4/from torchao.utils import torch_version_at_least; TORCH_VERSION_AFTER_2_4 = torch_version_at_least("2.4.0")/' /testbed/tests/recipes/test_configs.py
+
+# Install project with dev extras
+RUN pip install --no-cache-dir -e ".[dev]"
+
+# flash_attn is a hard import in this fork but unavailable without CUDA.
+# Install a minimal stub so imports succeed for CPU-only unit tests.
+RUN python -c "\
+import site, os, pathlib; \
+sp = site.getsitepackages()[0]; \
+fa = pathlib.Path(sp) / 'flash_attn'; \
+fa.mkdir(exist_ok=True); \
+(fa / '__init__.py').write_text(''); \
+(fa / 'flash_attn_interface.py').write_text('def flash_attn_varlen_func(*a,**k): raise RuntimeError(\"flash_attn not available on CPU\")\ndef flash_attn_func(*a,**k): raise RuntimeError(\"flash_attn not available on CPU\")\n'); \
+"
+
+# Verify test runner
+RUN pytest --version

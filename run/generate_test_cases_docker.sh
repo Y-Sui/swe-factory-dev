@@ -27,15 +27,19 @@ NUM_PROCS=8
 REPOS=(
   "MiroMindAI__MiroThinker"
   "MiroMindAI__miroflow"
+  "MiroMindAI__sd-torchtune"
 )
 
-# Step 1: Add version info to instances (required by Stage II)
+# Step 1: Add version info to instances (modifies file in-place)
 for REPO in "${REPOS[@]}"; do
-  INSTANCE_FILE="$DATA_DIR/$REPO/instances.jsonl.all"
+  INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
+  if [ -z "$INSTANCE_FILE" ]; then
+    echo "=== No instances_selected file found for $REPO, skipping ==="
+    continue
+  fi
 
-  if python - "$INSTANCE_FILE" <<'PY'
-import json
-import sys
+  if python3 - "$INSTANCE_FILE" <<'PY'
+import json, sys
 path = sys.argv[1]
 try:
     with open(path, "r", encoding="utf-8") as f:
@@ -57,7 +61,7 @@ PY
   fi
 
   echo "=== Getting versions for $REPO ==="
-  python "$SCRIPT_DIR/get_version.py" \
+  python3 "$SCRIPT_DIR/get_version.py" \
     --instance_path "$INSTANCE_FILE" \
     --testbed "$SETUP_DIR" \
     --max-workers 10 \
@@ -65,14 +69,20 @@ PY
 done
 
 # Step 2: Run the multi-agent env setup (Dockerfile + eval.sh generation)
+# Launch all repos in parallel to fully utilise NUM_PROCS across repos.
+PIDS=()
 for REPO in "${REPOS[@]}"; do
-  TASKS_MAP="$DATA_DIR/$REPO/instances.jsonl.all"
+  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
+  if [ -z "$TASKS_MAP" ]; then
+    echo "=== No instances_selected file found for $REPO, skipping ==="
+    continue
+  fi
   OUT_DIR="$DATA_DIR/$REPO/setup_output"
   RESULT_DIR="$DATA_DIR/$REPO/setup_output/results"
   mkdir -p "$OUT_DIR" "$RESULT_DIR"
 
   echo "=== Running Stage II for $REPO with $MODEL ==="
-  python app/main.py swe-bench \
+  python3 app/main.py swe-bench \
     --model "$MODEL" \
     --tasks-map "$TASKS_MAP" \
     --num-processes "$NUM_PROCS" \
@@ -80,8 +90,15 @@ for REPO in "${REPOS[@]}"; do
     --conv-round-limit "$ROUND" \
     --output-dir "$OUT_DIR" \
     --setup-dir "$SETUP_DIR" \
-    --results-path "$RESULT_DIR" \
-    --disable-run-test
+    --results-path "$RESULT_DIR" &
+  PIDS+=($!)
 done
+
+# Wait for all repos and fail if any errored
+FAIL=0
+for PID in "${PIDS[@]}"; do
+  wait "$PID" || FAIL=1
+done
+[ "$FAIL" -eq 0 ] || exit 1
 
 echo "=== Done ==="

@@ -76,9 +76,7 @@ def get_top_level_entities(file_name: str, source_code: str) -> list[Entity]:
     """
     try:
         tree = ast.parse(source_code)
-    except:
-        # print(f"Syntax error in {file_name}")
-        # print(source_code)
+    except SyntaxError:
         raise
     entities = []
 

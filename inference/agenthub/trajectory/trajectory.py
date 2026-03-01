@@ -193,7 +193,7 @@ class Trajectory(BaseModel):
 
         try:
             p2p_rate = self.p2p_rate
-        except:
+        except (AttributeError, TypeError, ValueError):
             p2p_rate = [0]
 
         return {
