@@ -29,7 +29,8 @@ REPOS=(
 
 # Step 1: Add version info to instances (modifies file in-place)
 for REPO in "${REPOS[@]}"; do
-  INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
+  # INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
+  INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
   if [ -z "$INSTANCE_FILE" ]; then
     echo "=== No instances_selected file found for $REPO, skipping ==="
     continue
@@ -67,7 +68,7 @@ done
 
 # Step 2: Prepare task lists, then run all repos in parallel.
 for REPO in "${REPOS[@]}"; do
-  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
+  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
   if [ -z "$TASKS_MAP" ]; then continue; fi
   OUT_DIR="$DATA_DIR/$REPO/setup_output_small"
   TASK_LIST="$OUT_DIR/task_list_small.txt"
@@ -97,7 +98,7 @@ done
 
 PIDS=()
 for REPO in "${REPOS[@]}"; do
-  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
+  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
   if [ -z "$TASKS_MAP" ]; then continue; fi
   OUT_DIR="$DATA_DIR/$REPO/setup_output_small"
   RESULT_DIR="$OUT_DIR/results"
