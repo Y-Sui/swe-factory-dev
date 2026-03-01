@@ -16,6 +16,9 @@ RUN pip install --no-cache-dir torch==2.9.1 torchvision --index-url https://down
 # transformers: needed by miromind HF comparison tests
 RUN pip install --no-cache-dir transformers
 
+# TORCH_VERSION_AFTER_2_4 was removed from torchao; replace with the modern equivalent
+RUN sed -i 's/from torchao.utils import TORCH_VERSION_AFTER_2_4/from torchao.utils import torch_version_at_least; TORCH_VERSION_AFTER_2_4 = torch_version_at_least("2.4.0")/' /testbed/tests/recipes/test_configs.py
+
 # Install project with dev extras
 RUN pip install --no-cache-dir -e ".[dev]"
 
