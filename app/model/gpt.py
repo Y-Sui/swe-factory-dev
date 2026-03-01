@@ -401,7 +401,15 @@ class Gpt5_mini(OpenaiModel):
 class Gpt4_1(OpenaiModel):
     def __init__(self):
         super().__init__("gpt-4.1", 8192, 0.000002, 0.000008)
-        
+
+class Gpt4_1_OpenRouter(OpenaiModel):
+    def __init__(self):
+        super().__init__("openai/gpt-4.1", 8192, 0.000002, 0.000008)
+
+class Grok4_Fast(OpenaiModel):
+    def __init__(self):
+        super().__init__("x-ai/grok-4.1-fast", 8192, 0.000003, 0.000015)
+
 class Gemini_2_5_flash_preview(OpenaiModel):
     def __init__(self):
         super().__init__("google/gemini-2.5-flash-preview", 16384, 0.00000015, 0.0000006)

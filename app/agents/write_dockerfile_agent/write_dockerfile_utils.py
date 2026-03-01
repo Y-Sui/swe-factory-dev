@@ -66,11 +66,9 @@ The Dockerfile must ensure that the provided test files can be executed correctl
 7. If there is a reference Dockerfile, use it as a guideline.   
 8. Do not use ENTRYPOINT.
 9. Please install necessary essential tools and libraries required for development and runtime, such as git etc.
-10. When setting up dependencies for the target repository (e.g., `torch 3.33`), **DO NOT** install the package directly from external registries (e.g., PyPI, NPM, Maven Central) using commands like `pip install <package>` (e.g., `pip install torch`).  
-   Instead, **you can install the repository itself in development mode** (`pip install -e .` for Python, `npm link` for Node.js, or `mvn install` for Java) to ensure that the local repository’s code is correctly referenced during execution.
-   **Why is this important?**  
-   - If you modify the repository’s source code but have already installed a pre-built package from the registry, your system may load the installed package instead of your local code, **leading to incorrect test results and making debugging difficult**.  
-   - Using development mode installation (`pip install -e .`, `npm link`, `mvn install`) ensures that the system always references the latest local repository code, preventing version mismatches and ensuring that modifications are properly reflected in subsequent tests.
+10. Always install the target repository itself in development mode (`pip install -e .` for Python, `npm link` for Node.js, or `mvn install` for Java) so tests use the local cloned code, not a pre-built registry package.
+   In addition, freely install any extra dependencies required by the tests (e.g. `pip install torch`, `pip install pytest`) using the package manager — these are environment dependencies, not the target package itself, and installing them from registries is correct and expected.
+   **Do NOT** re-install the target repository package itself from a registry (e.g. `pip install black` when the repo IS black) as that would shadow the local code.
 11. If you frequently encounter issues with the base image, consider using FROM ubuntu:xx.xx and manually installing dependencies (node,maven,java,python,etc.) to ensure a stable and reliable environment.
 
 ### **Example Format:**
@@ -126,11 +124,9 @@ The Dockerfile must ensure that the provided test files can be executed correctl
 7. If there is a reference Dockerfile, use it as a guideline.   
 8. Do not use ENTRYPOINT.
 9. Please install necessary essential tools and libraries required for development and runtime, such as git etc.
-10. When setting up dependencies for the target repository (e.g., `torch 3.33`), **DO NOT** install the package directly from external registries (e.g., PyPI, NPM, Maven Central) using commands like `pip install <package>` (e.g., `pip install torch`).  
-   Instead, **you can install the repository itself in development mode** (`pip install -e .` for Python, `npm link` for Node.js, or `mvn install` for Java) to ensure that the local repository’s code is correctly referenced during execution.
-   **Why is this important?**  
-   - If you modify the repository’s source code but have already installed a pre-built package from the registry, your system may load the installed package instead of your local code, **leading to incorrect test results and making debugging difficult**.  
-   - Using development mode installation (`pip install -e .`, `npm link`, `mvn install`) ensures that the system always references the latest local repository code, preventing version mismatches and ensuring that modifications are properly reflected in subsequent tests.
+10. Always install the target repository itself in development mode (`pip install -e .` for Python, `npm link` for Node.js, or `mvn install` for Java) so tests use the local cloned code, not a pre-built registry package.
+   In addition, freely install any extra dependencies required by the tests (e.g. `pip install torch`, `pip install pytest`) using the package manager — these are environment dependencies, not the target package itself, and installing them from registries is correct and expected.
+   **Do NOT** re-install the target repository package itself from a registry (e.g. `pip install black` when the repo IS black) as that would shadow the local code.
 11. **You MUST use `ubuntu` image as the base image and manually install dependencies **, to avoid issues related to unavailable or broken images. This approach ensures that the Dockerfile builds successfully and the environment is properly set up. For example, you can use:
     ```dockerfile
     FROM ubuntu:xx.xx
@@ -287,11 +283,25 @@ REPO_ENV_TEMPLATES = {
 - Package manager: pip
 - Install:
   ```
-  pip install torch torchvision  # install PyTorch first (CPU version for tests)
+  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu  # CPU-only PyTorch
   pip install -e ".[dev]"        # installs torchtune + all dev/test deps
   pip install torchao            # REQUIRED: tests/conftest.py imports torchao; not in [dev] extras
   ```
-- Test runner: pytest 7.4.0 (`pytest tests/ -v`)
+- CRITICAL — flash_attn cannot be installed in CPU-only Docker:
+  `torchtune/modules/attention.py` imports `flash_attn` unconditionally at the top level,
+  which causes ALL pytest collection to fail with ModuleNotFoundError even for unrelated tests.
+  `flash-attn` is a CUDA C++ extension — it cannot be pip-installed in a CPU-only container
+  (no CUDA headers, build takes 20+ min, will fail or time out).
+  Fix: install a minimal stub package so the import succeeds without CUDA. Add to Dockerfile
+  AFTER `pip install -e ".[dev]"` (pip install sets the site-packages path):
+  ```dockerfile
+  RUN SITE=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
+      mkdir -p $SITE/flash_attn && \
+      echo 'flash_attn_varlen_func = lambda *a, **kw: None' > $SITE/flash_attn/__init__.py && \
+      echo 'flash_attn_varlen_func = lambda *a, **kw: None' > $SITE/flash_attn/flash_attn_interface.py
+  ```
+  This makes `from flash_attn.flash_attn_interface import flash_attn_varlen_func` succeed at import time.
+- Test runner: pytest 7.4.0 (`pytest tests/ -v --without-integration`)
   - Existing tests: 159 files under `tests/`
   - Run subset: `pytest tests/torchtune/ -v --without-integration`
 - Test deps (from [dev]): pytest==7.4.0, pytest-cov, pytest-mock, pytest-integration, expecttest
