@@ -272,7 +272,7 @@ class RepoBrowseManager:
             webpage_content = self.get_webpage_content(url)
             
             # Step 2: Use LLM to extract environment information
-            extracted_info = browse_file_run_with_retries(webpage_content)
+            extracted_info = browse_file_run_with_retries(webpage_content, "Extract environment setup information from this webpage.")
 
             # Step 3: Return extracted information
             return extracted_info, 'Get Web Info', True

@@ -149,16 +149,18 @@ def build_patch_from_files(files: dict[str, str], output_dir: str) -> tuple[str,
 def write_test_with_retries(
     msg_thread: MessageThread,
     output_dir: str,
+    repo_root: str | None = None,
     retries: int = 3,
     print_callback: Callable[[dict], None] | None = None,
-) -> tuple[str, str | None, list[str], bool]:
+) -> tuple[str, str | None, list[str], dict[str, str], bool]:
     """
     Call LLM to generate test files, with retries on format extraction failure.
-    Returns (result_msg, patch_str, test_file_list, success).
+    Returns (result_msg, patch_str, test_file_list, test_file_contents, success).
     """
     new_thread = msg_thread
     patch_content = None
     test_files = []
+    test_file_contents: dict[str, str] = {}
     can_stop = False
     result_msg = ""
     os.makedirs(output_dir, exist_ok=True)
@@ -192,6 +194,7 @@ def write_test_with_retries(
         extracted_files = extract_test_files_from_response(res_text)
         if extracted_files:
             patch_content, test_files = build_patch_from_files(extracted_files, output_dir)
+            test_file_contents = extracted_files
             can_stop = True
         else:
             patch_content, test_files = None, []
@@ -208,7 +211,7 @@ def write_test_with_retries(
     if result_msg == '':
         result_msg = 'Failed to generate test patch.'
 
-    return result_msg, patch_content, test_files, can_stop
+    return result_msg, patch_content, test_files, test_file_contents, can_stop
 
 
 # ---------------------------------------------------------------------------
@@ -221,9 +224,11 @@ def refine_tests_with_reflexion(
     problem_statement: str,
     code_patch: str,
     output_dir: str,
+    repo_root: str | None = None,
+    test_file_contents: dict[str, str] | None = None,
     max_rounds: int = 2,
     print_callback: Callable[[dict], None] | None = None,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], dict[str, str]]:
     """
     Run multi-round reflexion to improve generated tests.
 
@@ -232,10 +237,11 @@ def refine_tests_with_reflexion(
       2. If "TESTS_APPROVED" in critique, stop early.
       3. Otherwise, refine based on critique.
 
-    Returns (refined_patch, refined_test_files).
+    Returns (refined_patch, refined_test_files, refined_file_contents).
     """
     current_patch = generated_patch
     current_files = re.findall(r'\+\+\+ b/(.*)', current_patch)
+    current_file_contents: dict[str, str] = test_file_contents or {}
 
     for round_num in range(1, max_rounds + 1):
         round_dir = pjoin(output_dir, f"reflexion_round_{round_num}")
@@ -287,9 +293,10 @@ def refine_tests_with_reflexion(
             refined_patch, refined_files = build_patch_from_files(extracted_files, round_dir)
             current_patch = refined_patch
             current_files = refined_files
+            current_file_contents = extracted_files
             logger.info(f"Reflexion round {round_num}: refined to {len(refined_files)} file(s).")
         else:
             logger.warning(f"Reflexion round {round_num}: failed to extract refined files, keeping previous version.")
             break
 
-    return current_patch, current_files
+    return current_patch, current_files, current_file_contents
