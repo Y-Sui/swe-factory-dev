@@ -15,7 +15,6 @@ from app.prompts.prompts import (
     get_dockerfile_system_prompt,
     get_dockerfile_user_prompt_modify,
     get_dockerfile_instance_layer_user_prompt,
-    get_repo_env_template,
 )
 import re
 
@@ -41,10 +40,19 @@ def get_user_prompt_modify_dockerfile() -> str:
     return get_dockerfile_user_prompt_modify()
 
 
-def get_user_prompt_instance_layer_dockerfile(base_image: str, base_commit: str) -> str:
+def get_user_prompt_instance_layer_dockerfile(
+    base_image: str,
+    base_commit: str,
+    instance_id: str = "",
+    patch: str = "",
+    patch_files_list: str = "",
+) -> str:
     return get_dockerfile_instance_layer_user_prompt(
         base_image=base_image,
         base_commit=base_commit,
+        instance_id=instance_id,
+        patch=patch,
+        patch_files_list=patch_files_list,
     )
 
 

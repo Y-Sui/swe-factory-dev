@@ -534,6 +534,84 @@ class Claude3_7Sonnet(OpenaiModel):
         )
 
 
+class ClaudeOpus4_1(OpenaiModel):
+    def __init__(self):
+        super().__init__(
+            "anthropic/claude-opus-4.1",
+            8192,
+            0.000015,
+            0.000075,
+            parallel_tool_call=True,
+        )
+        self.note = "Claude Opus 4.1 via OpenRouter"
+
+    @retry(wait=wait_random_exponential(min=30, max=600), stop=stop_after_attempt(3))
+    def call(
+        self,
+        messages: list[dict],
+        top_p: float = 1,
+        tools: list[dict] | None = None,
+        response_format: Literal["text", "json_object"] = "text",
+        temperature: float | None = None,
+        **kwargs,
+    ) -> tuple[
+        str,
+        list[ChatCompletionMessageToolCall] | None,
+        list[FunctionCallIntent],
+        float,
+        int,
+        int,
+    ]:
+        if response_format == "json_object":
+            last_content = messages[-1]["content"]
+            last_content += "\nYour response MUST start with { and end with }. DO NOT write anything else other than the json. Ignore writing triple-backticks. DO NOT start with ```json. Your response MUST start with { and end with }."
+            messages[-1]["content"] = last_content
+            response_format = "text"
+
+        return super().call(
+            messages, top_p, tools, response_format, temperature, **kwargs
+        )
+
+
+class ClaudeOpus4_6(OpenaiModel):
+    def __init__(self):
+        super().__init__(
+            "anthropic/claude-opus-4.6",
+            8192,
+            0.000015,
+            0.000075,
+            parallel_tool_call=True,
+        )
+        self.note = "Claude Opus 4.6 via OpenRouter"
+
+    @retry(wait=wait_random_exponential(min=30, max=600), stop=stop_after_attempt(3))
+    def call(
+        self,
+        messages: list[dict],
+        top_p: float = 1,
+        tools: list[dict] | None = None,
+        response_format: Literal["text", "json_object"] = "text",
+        temperature: float | None = None,
+        **kwargs,
+    ) -> tuple[
+        str,
+        list[ChatCompletionMessageToolCall] | None,
+        list[FunctionCallIntent],
+        float,
+        int,
+        int,
+    ]:
+        if response_format == "json_object":
+            last_content = messages[-1]["content"]
+            last_content += "\nYour response MUST start with { and end with }. DO NOT write anything else other than the json. Ignore writing triple-backticks. DO NOT start with ```json. Your response MUST start with { and end with }."
+            messages[-1]["content"] = last_content
+            response_format = "text"
+
+        return super().call(
+            messages, top_p, tools, response_format, temperature, **kwargs
+        )
+
+
 class Claude4_5Sonnet(OpenaiModel):
     def __init__(self):
         super().__init__(

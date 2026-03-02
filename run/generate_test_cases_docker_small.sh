@@ -16,21 +16,27 @@ export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 echo "=== Building base images ==="
 if ! docker image inspect swe-factory/miroflow:base &>/dev/null; then
   docker build -t swe-factory/miroflow:base -f docker/Dockerfile.miroflow .
+else
+  echo "  swe-factory/miroflow:base already exists, skipping build."
 fi
 if ! docker image inspect swe-factory/mirothinker:base &>/dev/null; then
   docker build -t swe-factory/mirothinker:base -f docker/Dockerfile.mirothinker .
+else
+  echo "  swe-factory/mirothinker:base already exists, skipping build."
 fi
 if ! docker image inspect swe-factory/sd-torchtune:base &>/dev/null; then
   docker build --build-arg GITHUB_TOKEN="${GITHUB_TOKEN}" \
     -t swe-factory/sd-torchtune:base -f docker/Dockerfile.sd-torchtune .
+else
+  echo "  swe-factory/sd-torchtune:base already exists, skipping build."
 fi
 
 SCRIPT_DIR="data_collection/collect"
 DATA_DIR="../internal-swe-bench-data"
 SETUP_DIR="testbed"
-# MODEL="anthropic/claude-sonnet-4.5"
-MODEL="google/gemini-2.5-flash"
-ROUND=3
+MODEL="anthropic/claude-opus-4.1"
+# MODEL="google/gemini-2.5-flash"
+ROUND=5
 NUM_PROCS=5
 MAX_INSTANCES=1
 

@@ -85,7 +85,6 @@ class WriteTestAgent(Agent):
 
         # Build user prompt
         user_prompt = write_test_utils.USER_PROMPT_WRITE_TEST.format(
-            repo_info=self.repo_basic_info,
             instance_id=self.task.task_id,
             base_commit=self.task.commit,
             problem_statement=self.task.problem_statement,

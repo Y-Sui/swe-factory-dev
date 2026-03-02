@@ -66,9 +66,13 @@ If test logs are NOT available (static analysis):
 ### **Step 1.5: F2P Validation** (only when F2P classification is provided)
 Use the F2P result to guide your diagnosis:
   - **FAIL2PASS**: Desired outcome. Set `is_finish = true` if the post-patch run passed cleanly.
-  - **PASS2PASS**: Tests do not capture the bug. Provide guidance to `write_test_agent`. Check whether the tests mock the very function the patch modifies — if so, instruct `write_test_agent` to remove that mock and call the real code.
-  - **FAIL2FAIL**: Likely an environment/setup issue. Provide guidance to `write_dockerfile_agent` and/or `write_eval_script_agent`.
-  - **PASS2FAIL**: Tests are broken or inverted. Provide guidance to `write_test_agent` to fix the test logic.
+  - **PASS2PASS**: Tests do not capture the bug. The tests pass even on the buggy code. Diagnose WHY:
+    1. Check whether the tests mock the very function the patch modifies — if so, the mock always returns the expected value, bypassing real code. Instruct `write_test_agent` to remove that mock and call the real implementation.
+    2. Check whether the F2P assertions are too weak — e.g., `assert result is not None`, `assert result`, `assert len(result) > 0`. These pass even when the function returns a wrong value. Instruct `write_test_agent` to assert the EXACT expected value that the fixed code returns.
+    3. Check whether the tests call a different function than the one patched (wrong import, wrong class method). Instruct `write_test_agent` to call the exact function/method modified in the gold patch.
+    4. In your guidance to `write_test_agent`: (a) identify which line of the gold patch is the key change, (b) state what the BUGGY code returns/raises for a concrete input, (c) state what the FIXED code returns/raises for that same input, (d) instruct the agent to write an assertion that FAILS on the buggy output.
+  - **FAIL2FAIL**: Tests fail both before and after the patch. Likely an environment/setup issue or import error. Check the pre-patch test log for the error message. Provide guidance to `write_dockerfile_agent` and/or `write_eval_script_agent` to fix environment issues. If it's an import error in the test itself, also guide `write_test_agent` to fix the import path.
+  - **PASS2FAIL**: Tests pass without patch but fail with it — tests are broken or inverted. Provide guidance to `write_test_agent` to fix the test logic.
   - **ERROR**: Ensure the eval script echoes `OMNIGRIL_EXIT_CODE=$rc` properly.
 
 ### **Step 2: Identify Problems**
@@ -81,7 +85,7 @@ Use the F2P result to guide your diagnosis:
 - For **Dockerfile** issues: provide guidance to `write_dockerfile_agent` with the original error message.
 - For **eval script** issues: provide guidance to `write_eval_script_agent` with the original error message.
 - For **test file** issues: provide guidance to `write_test_agent` on how to improve them.
-  - **PASS2PASS diagnosis**: Before sending generic "strengthen the test" guidance, check whether the tests mock the very function or class that the patch modifies. If so, that is the root cause — the test calls a mock instead of the real implementation and will always pass. Instruct `write_test_agent` to remove that mock and call the real code instead.
+  - **PASS2PASS diagnosis**: Check in order: (1) Are the tests mocking the patched function? → instruct to call real code. (2) Are the F2P assertions too weak (`assert result is not None`, `assert result`, `assert len > 0`)? → instruct to assert the exact correct value from the fixed code. (3) Are the tests calling the wrong function/module? → instruct to import and call the exact patched symbol. Always include in your guidance: what the buggy code produces for a specific input, what the fixed code produces, and what concrete assertion would catch the difference.
 - If more repo context is needed: provide guidance to `context_retrieval_agent`. Be specific about which files to look for (e.g., requirements.txt, pyproject.toml, pytest.ini, .github/workflows/*). Only request context retrieval when clearly necessary — it is expensive.
 
 ### **Output**

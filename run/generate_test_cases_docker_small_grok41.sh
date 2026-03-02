@@ -30,7 +30,7 @@ DATA_DIR="../internal-swe-bench-data"
 SETUP_DIR="testbed"
 MODEL="x-ai/grok-4.1-fast"
 MODEL_SLUG="grok-4.1-fast"
-ROUND=3
+ROUND=5
 NUM_PROCS=5
 MAX_INSTANCES=1
 

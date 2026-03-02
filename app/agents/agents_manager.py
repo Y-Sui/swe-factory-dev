@@ -1,6 +1,7 @@
 from app.task import SweTask
 from app.agents.write_dockerfile_agent import WriteDockerfileAgent
-from app.agents.write_dockerfile_agent.write_dockerfile_utils import get_repo_env_template, get_base_image_for_repo
+from app.agents.write_dockerfile_agent.write_dockerfile_utils import get_base_image_for_repo
+from app.prompts.prompts import get_repo_env_template
 from app.agents.test_analysis_agent import TestAnalysisAgent
 from app.agents.write_eval_script_agent import WriteEvalScriptAgent
 from app.agents.context_retrieval_agent import ContextRetrievalAgent

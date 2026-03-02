@@ -53,9 +53,16 @@ class WriteDockerfileAgent(Agent):
             self.add_user_message(f"Previous dockerfile:\n{prev_content}\n")
             self.add_user_message(write_dockerfile_utils.get_user_prompt_modify_dockerfile())
         else:
+            patch_files = "\n".join(
+                line[6:] for line in self.task.patch.splitlines()
+                if line.startswith("+++ b/")
+            )
             self.add_user_message(write_dockerfile_utils.get_user_prompt_instance_layer_dockerfile(
                 base_image=self.task.base_image,
                 base_commit=self.task.commit,
+                instance_id=self.task.task_id,
+                patch=self.task.patch,
+                patch_files_list=patch_files,
             ))
 
         task_output = write_dockerfile_utils.write_dockerfile_with_retries(

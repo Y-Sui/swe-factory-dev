@@ -10,6 +10,8 @@ Sections:
   6. Context Retrieval Agent
 """
 
+import pathlib
+
 # ===========================================================================
 # 1. DOCKERFILE AGENT — FULL-BUILD MODE
 # ===========================================================================
@@ -159,21 +161,15 @@ RUN echo "source /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbe
 """
 
 
-DOCKERFILE_USER_PROMPT_MODIFY = """Please modify current dockerfile according to collected information.
-Important Notes:
-1. If the Dockerfile is building a project that is itself a PyPI package (e.g., black, flake8, mypy, etc.), and the repository is cloned and installed with `pip install -e .`, then:
-- **Do NOT pre-install the same package from PyPI** using `pip install black` or similar. This is redundant and can lead to version conflicts or incorrect test behavior.
-- Always assume the cloned repo is the authoritative source of truth.
+DOCKERFILE_USER_PROMPT_MODIFY = """The previous Dockerfile attempt failed. Modify it based on the feedback above.
 
-2. **Do NOT run tests directly inside the Dockerfile** (e.g., avoid adding `RUN pytest` or `RUN make test` inside the Dockerfile):
-- Testing should be performed **after** the image is built (in CI pipeline or post-build validation step), not during image creation.
-- Embedding tests in the Dockerfile breaks caching and slows down builds.
+Rules:
+- Keep the `FROM` line exactly as-is — do NOT change the base image.
+- Do NOT add `git clone` — the repo is already at `/testbed`.
+- Do NOT run tests inside the Dockerfile.
+- Do NOT repeat steps already done by the base image (refer to the base Dockerfile content shown earlier).
 
-3. If you frequently encounter issues with the base image in **full-build mode**, consider using `FROM ubuntu:xx.xx` and manually installing dependencies to ensure a stable environment. However, this does NOT apply in instance-layer mode — see note 4.
-
-4. **CRITICAL (instance-layer mode)**: If the current Dockerfile starts with `FROM swe-factory/...` or any other custom base image (not `python:*` or `ubuntu:*`), you are in instance-layer mode. You MUST keep that `FROM` line unchanged. Do NOT replace it with `python:*`, `ubuntu:*`, or any other image. Do NOT add `git clone` — the repo is already at `/testbed`.
-
-Return modified dockerfile in defined format. Wrap results in <dockerfile></dockerfile>.
+Return the corrected Dockerfile wrapped in <dockerfile></dockerfile>.
 """
 
 
@@ -181,71 +177,33 @@ Return modified dockerfile in defined format. Wrap results in <dockerfile></dock
 # 2. DOCKERFILE AGENT — INSTANCE-LAYER MODE (multi-layer build)
 # ===========================================================================
 
-DOCKERFILE_INSTANCE_LAYER_SYSTEM_PROMPT = """You are an Instance Dockerfile Agent. Your ONLY job is to generate a Dockerfile that layers on top of an existing base Docker image to prepare the environment for a specific commit of the codebase.
+DOCKERFILE_INSTANCE_LAYER_SYSTEM_PROMPT = """You are an Instance Dockerfile Agent. Generate a minimal Dockerfile that layers on top of a pre-built base image to prepare the environment for a specific commit.
 
-## CRITICAL RULE
+## Rules
 
-**You MUST start with `FROM <base_image>` exactly as provided.**
-- Do NOT use `python:*`, `ubuntu:*`, or any other base image — only the specified base image.
-- Do NOT include `git clone` — the repository is already cloned at `/testbed`.
-- The first non-comment line of your Dockerfile MUST be `FROM <base_image>`.
+- **First line MUST be `FROM <base_image>`** — the exact tag provided. Never use `python:*`, `ubuntu:*`, or any other image.
+- **Do NOT repeat anything already in the base Dockerfile** — the user prompt shows the exact base Dockerfile content. Everything in it is already done.
+- **Do NOT `git clone`** — the repo is already at `/testbed`.
+- Only add what is strictly necessary for the target commit: `git checkout`, `git clean -fd`, and re-syncing deps if they changed.
 
-## What the Base Image Already Contains
+## Output
 
-- Full git repository cloned at `/testbed` (with complete git history)
-- Project dependencies installed
-- Python, git, pytest, and system tools ready
-- The repo is installed in editable mode (`pip install -e .`)
+Wrap the Dockerfile in `<dockerfile>` tags. Return ONLY the Dockerfile — no explanation.
 
-## Your Responsibilities
-
-1. `git checkout` to the correct `base_commit`
-2. Handle any dependency changes at that commit (e.g., if `setup.py` or `requirements.txt` differs from what the base image installed)
-3. Re-install the project if needed
-4. Ensure the environment is ready for tests to run
-
-## What is NOT Your Job
-
-- Writing tests (a separate Test Agent handles this)
-- Running tests
-- Applying patches
-- Anything beyond environment setup
-
-## Output Format
-
-Wrap the Dockerfile in `<dockerfile>` tags. Return ONLY the Dockerfile — no explanation, no preamble.
-
-## Decision Rules
-
-**When to add extra `pip install`:**
-- The `setup.py` / `pyproject.toml` at `base_commit` has different dependencies than the latest version
-- The issue mentions a specific dependency version requirement
-- The patch modifies dependency files
-
-**When to add system packages:**
-- The code at `base_commit` imports a library that needs system-level deps not in the base image
-- Usually NOT needed — the base image should cover this
-
-**When to re-install the project:**
-- ALWAYS re-run `pip install -e .` after checkout, because the project's setup files may differ at this commit
-
-## Common Failure Patterns to Avoid
-
-1. **Forgetting `git clean -fd`** after checkout — leftover files from the base image's commit can cause conflicts
-2. **Not re-installing after checkout** — if `setup.py` changed between commits, the installed package will be stale
-3. **Installing unnecessary packages** — only add what this specific commit needs beyond the base
-4. **Using `git checkout -f`** — prefer `git checkout` + `git clean -fd` for a cleaner state
-
-You will also receive feedback from the test_analysis_agent if a previous Dockerfile attempt failed — apply its guidance precisely."""
+If the test_analysis_agent provided feedback on a previous attempt, apply it precisely."""
 
 
 DOCKERFILE_INSTANCE_LAYER_USER_PROMPT = """Generate a minimal **instance-layer Dockerfile** that builds on top of the pre-built base image.
 
-## Base Image
+## Base Image: `{base_image}`
 
-- **Image name**: `{base_image}`
-- **Python version**: {python_version}
-- **Key installed packages**: {key_packages}
+The following is the **exact Dockerfile used to build `{base_image}`**.
+Everything in it is ALREADY done — do NOT repeat any of these steps.
+
+```dockerfile
+{base_dockerfile_content}
+```
+
 - **Main package name**: {main_package} (used for the verification import check)
 
 ## Instance Info
@@ -299,11 +257,25 @@ RUN cd /testbed && python -c "import {main_package}; print('OK')"
 """
 
 
+def _load_base_dockerfile(base_image: str) -> str:
+    """Load the base Dockerfile content for the given image tag from docker/.
+
+    Derives the filename from _REPO_ENV_CONFIG by matching the base image tag.
+    Returns a placeholder string if the file cannot be found or read.
+    """
+    for _tag, dockerfile_name, _ in _REPO_ENV_CONFIG.values():
+        if _tag == base_image:
+            dockerfile_path = _DOCKER_DIR / dockerfile_name
+            try:
+                return dockerfile_path.read_text(encoding="utf-8").rstrip()
+            except OSError:
+                return f"(could not read {dockerfile_path})"
+    return "(base Dockerfile not found for this image — refer to the repo-specific environment template)"
+
+
 def get_dockerfile_instance_layer_user_prompt(
     base_image: str,
     base_commit: str,
-    python_version: str = "3.x",
-    key_packages: str = "see base image",
     main_package: str = "",
     instance_id: str = "",
     dep_file_content: str = "same as base image",
@@ -313,13 +285,12 @@ def get_dockerfile_instance_layer_user_prompt(
     return DOCKERFILE_INSTANCE_LAYER_USER_PROMPT.format(
         base_image=base_image,
         base_commit=base_commit,
-        python_version=python_version,
-        key_packages=key_packages,
         main_package=main_package,
         instance_id=instance_id,
         dep_file_content=dep_file_content,
         patch_files_list=patch_files_list,
         patch=patch,
+        base_dockerfile_content=_load_base_dockerfile(base_image),
     )
 
 
@@ -343,131 +314,158 @@ def get_dockerfile_user_prompt_modify() -> str:
 # 3. DOCKERFILE AGENT — REPO-SPECIFIC ENVIRONMENT TEMPLATES
 # ===========================================================================
 
-REPO_ENV_TEMPLATES: dict[str, str] = {
-    "MiroMindAI/miroflow": """### Repo Environment: MiroMindAI/miroflow
-- Language: Python >=3.12
-- Build system: hatchling (`pyproject.toml`, `[build-system] requires = ["hatchling"]`)
-- Package manager: uv ONLY — do NOT mix with `python3 -m venv` or `pip install`
-- Install uv (IMPORTANT — use one of these two methods, do NOT use `pip install uv`):
-  ```dockerfile
-  # Method A (recommended): copy the uv binary directly from the official image
-  COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Maps repo name → (base image tag, base Dockerfile filename, instance-layer guidance)
+_REPO_ENV_CONFIG: dict[str, tuple[str, str, str]] = {
+    "MiroMindAI/miroflow": (
+        "swe-factory/miroflow:base",
+        "Dockerfile.miroflow",
+        """\
+## What the instance-layer Dockerfile MUST do (and nothing else)
+```dockerfile
+FROM swe-factory/miroflow:base
+WORKDIR /testbed
+RUN git checkout <commit> && git clean -fd
+RUN uv sync                              # re-syncs if deps changed at this commit
+RUN uv pip install pytest pytest-asyncio # ensure test deps present
+```
+Do NOT run `uv venv` — `.venv` already exists. Do NOT git clone again.
+Do NOT add `ENV PATH=...` — call pytest via `.venv/bin/pytest` (see eval.sh pattern).
 
-  # Method B: install script, installs to /usr/local/bin
-  RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
-  ```
-- CRITICAL — use uv exclusively, never mix with python3 -m venv:
-  `uv sync` creates and manages its own `.venv` automatically at the WORKDIR.
-  If you also run `python3 -m venv venv`, you get TWO separate venvs and pytest
-  ends up in `.venv` while PATH points to `venv` — pytest will not be found.
-  Correct instance-layer pattern (repo already at /testbed — do NOT git clone):
-  ```dockerfile
-  FROM swe-factory/miroflow:base
-  WORKDIR /testbed
-  # DO NOT git clone — repo already exists at /testbed
-  RUN cd /testbed && git checkout <commit> && git clean -fd
-  COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-  RUN uv sync                              # creates /testbed/.venv automatically
-  RUN uv pip install pytest pytest-asyncio # installs into /testbed/.venv
-  ENV PATH="/testbed/.venv/bin:$PATH"
-  ```
-  eval.sh activation: `source /testbed/.venv/bin/activate`
-- Test runner: pytest (no existing tests — LLM-generated tests will be placed in /testbed/tests/)
-- Key deps: anthropic, openai, mcp, fastmcp, hydra-core, rich, fire, google-genai
-- Entry point: main.py
+## Project layout & import paths
+- pyproject.toml: `[tool.hatch.build.targets.wheel] packages = ["src"]`
+- This means `src/` IS the package root — there is NO `miroflow` top-level package.
+- CORRECT imports: `from core.foo import Bar`, `from llm.client import X`, `from utils.helper import Y`
+- WRONG imports: `from src.core.foo import Bar`, `from miroflow.core.foo import Bar`
+
+## eval.sh pattern (MUST follow exactly)
+```bash
+#!/bin/bash
+set -uxo pipefail
+cd /testbed
+mkdir -p tests                           # ensure test dir exists before patch apply
+git apply --no-index -v - <<'EOF_PATCH'
+[CONTENT OF TEST PATCH]
+EOF_PATCH
+.venv/bin/pytest tests/ -v
+rc=$?
+echo "OMNIGRIL_EXIT_CODE=$rc"
+```
+IMPORTANT: Use `.venv/bin/pytest` directly — `uv run pytest` may create a new venv and lose installed packages.
 """,
+    ),
 
-    "MiroMindAI/MiroThinker": """### Repo Environment: MiroMindAI/MiroThinker
-- Language: Python >=3.12
-- Structure: Monorepo — `apps/` and `libs/` sub-packages
-  - `libs/miroflow-tools/` — install first (editable)
-  - `apps/miroflow-agent/` — main app (where most patches apply), depends on miroflow-tools
-- Build system: hatchling for each sub-package
-- Package manager: `uv` (preferred) or `pip`
-- Install uv (IMPORTANT — use one of these two methods, do NOT use `pip install uv`):
-  ```dockerfile
-  # Method A (recommended): copy the uv binary directly from the official image
-  COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+    "MiroMindAI/MiroThinker": (
+        "swe-factory/mirothinker:base",
+        "Dockerfile.mirothinker",
+        """\
+## What the instance-layer Dockerfile MUST do (and nothing else)
+```dockerfile
+FROM swe-factory/mirothinker:base
+WORKDIR /testbed
+RUN git checkout <commit> && git clean -fd
+WORKDIR /testbed/apps/miroflow-agent
+RUN uv sync                              # re-syncs if deps changed; does NOT recreate venv
+```
+CRITICAL: Do NOT run `uv venv` — the `.venv` already exists at `/testbed/apps/miroflow-agent/.venv`.
+Do NOT add `ENV PATH=...` — use `uv run pytest` to invoke pytest.
 
-  # Method B: install script, installs to /usr/local/bin
-  RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
-  ```
-- CRITICAL — venv location and uv usage:
-  `uv sync` creates `.venv` at the CURRENT WORKDIR. You MUST set WORKDIR to
-  `/testbed/apps/miroflow-agent` BEFORE running `uv venv` or `uv sync`, so the
-  venv lands at `/testbed/apps/miroflow-agent/.venv`.
-  Do NOT run `uv venv` or `uv sync` from `/testbed` — the venv will be at the
-  wrong location and eval.sh will fail to activate it.
-  Correct instance-layer pattern (repo already at /testbed — do NOT git clone):
-  ```dockerfile
-  FROM swe-factory/mirothinker:base
-  COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-  WORKDIR /testbed
-  # DO NOT git clone — repo already exists at /testbed
-  RUN cd /testbed && git checkout <commit> && git clean -fd
-  # Install libs/miroflow-tools first using --system (no venv yet)
-  RUN uv pip install --system -e libs/miroflow-tools
-  # Now switch to the main app directory and create venv + sync there
-  WORKDIR /testbed/apps/miroflow-agent
-  RUN uv venv                              # creates /testbed/apps/miroflow-agent/.venv
-  RUN uv sync                              # installs all deps into that venv
-  RUN uv pip install pytest pytest-asyncio pytest-cov pytest-mock
-  ENV PATH="/testbed/apps/miroflow-agent/.venv/bin:$PATH"
-  ```
-  eval.sh activation: `source /testbed/apps/miroflow-agent/.venv/bin/activate`
-- WORKDIR for Dockerfile: `/testbed/apps/miroflow-agent` (this is where uv.lock and pyproject.toml live for the main app)
-- Test runner: pytest + pytest-asyncio (async tests use `asyncio_mode = "auto"`)
-  - Run from `/testbed/apps/miroflow-agent`: `pytest tests/ -v`
-  - Import paths in tests are relative to `apps/miroflow-agent/` — e.g. patch file `apps/miroflow-agent/src/core/foo.py` → `from src.core.foo import Foo`
-- Test deps: pytest, pytest-asyncio, pytest-cov, pytest-xdist, pytest-mock
+## Project layout & import paths
+- `apps/miroflow-agent/pyproject.toml`: `[tool.hatch.build.targets.wheel] packages = ["src"]`
+- This means `src/` IS the package root relative to `apps/miroflow-agent/`.
+- CORRECT imports: `from core.foo import Bar`, `from llm.client import X`
+- WRONG imports: `from src.core.foo import Bar`, `from miroflow.core.foo import Bar`
+- Monorepo: `apps/miroflow-agent/` is the main app, `libs/miroflow-tools/` is the lib
 - Key deps: anthropic, openai, mcp, fastmcp, e2b-code-interpreter, hydra-core, transformers
-- eval.sh pattern:
-  ```bash
-  cd /testbed/apps/miroflow-agent
-  source /testbed/apps/miroflow-agent/.venv/bin/activate
-  git apply --no-index -v - <<'EOF_114329324912'
-  [CONTENT OF TEST PATCH]
-  EOF_114329324912
-  pytest tests/ -v
-  rc=$?
-  echo "OMNIGRIL_EXIT_CODE=$rc"
-  ```
-""",
 
-    "MiroMindAI/sd-torchtune": """### Repo Environment: MiroMindAI/sd-torchtune
-- Language: Python 3.11 — CRITICAL: do NOT use Python 3.10. The [dev] dependency set
-  includes packages (e.g. contourpy==1.3.3) that require Python >=3.11. Python 3.10
-  will fail during `pip install -e ".[dev]"` with "No matching distribution found".
-- Build system: setuptools (`pyproject.toml`, `[build-system] requires = ["setuptools", "wheel"]`)
-- Package manager: pip
-- CRITICAL — flash_attn cannot be installed in CPU-only Docker:
-  `torchtune/modules/attention.py` imports `flash_attn` unconditionally at the top level,
-  which causes ALL pytest collection to fail with ModuleNotFoundError even for unrelated tests.
-  `flash-attn` is a CUDA C++ extension — it cannot be pip-installed in a CPU-only container
-  (no CUDA headers, build takes 20+ min, will fail or time out).
-  Fix: install a minimal stub package so the import succeeds without CUDA. Add to Dockerfile
-  AFTER `pip install -e ".[dev]"` (pip install sets the site-packages path):
-  ```dockerfile
-  RUN SITE=$(python3 -c "import site; print(site.getsitepackages()[0])") && \\
-      mkdir -p $SITE/flash_attn && \\
-      echo 'flash_attn_varlen_func = lambda *a, **kw: None' > $SITE/flash_attn/__init__.py && \\
-      echo 'flash_attn_varlen_func = lambda *a, **kw: None' > $SITE/flash_attn/flash_attn_interface.py
-  ```
-  This makes `from flash_attn.flash_attn_interface import flash_attn_varlen_func` succeed at import time.
-- Test runner: pytest 7.4.0 (`pytest tests/ -v --without-integration`)
-  - Existing tests: 159 files under `tests/`
-  - Run subset: `pytest tests/torchtune/ -v --without-integration`
-- Test deps (from [dev]): pytest==7.4.0, pytest-cov, pytest-mock, pytest-integration, expecttest
-- CLI entry: `tune` command (`torchtune._cli.tune:main`)
-- Key deps: torchdata, liger-kernel, datasets, huggingface_hub, safetensors, sentencepiece, tiktoken
-- Private repo: requires GITHUB_TOKEN (already handled by token injection)
+## eval.sh pattern (MUST follow exactly)
+```bash
+#!/bin/bash
+set -uxo pipefail
+cd /testbed/apps/miroflow-agent
+mkdir -p tests                           # ensure test dir exists before patch apply
+git apply --no-index -v - <<'EOF_PATCH'
+[CONTENT OF TEST PATCH]
+EOF_PATCH
+.venv/bin/pytest tests/ -v
+rc=$?
+echo "OMNIGRIL_EXIT_CODE=$rc"
+```
+IMPORTANT: Use `.venv/bin/pytest` directly — `uv run pytest` may create a new venv and lose installed packages.
 """,
+    ),
+
+    "MiroMindAI/sd-torchtune": (
+        "swe-factory/sd-torchtune:base",
+        "Dockerfile.sd-torchtune",
+        """\
+## What the instance-layer Dockerfile MUST do (and nothing else)
+```dockerfile
+FROM swe-factory/sd-torchtune:base
+WORKDIR /testbed
+RUN git checkout <commit> && git clean -fd
+# Re-apply the torchao compatibility fix after checkout (git clean resets tracked files)
+RUN sed -i 's/from torchao.utils import TORCH_VERSION_AFTER_2_4/from torchao.utils import torch_version_at_least; TORCH_VERSION_AFTER_2_4 = torch_version_at_least("2.4.0")/' /testbed/tests/recipes/test_configs.py
+RUN pip install --no-cache-dir -e ".[dev]"
+```
+Do NOT reinstall torch, torchao, or transformers — already in base image.
+Do NOT modify the flash_attn stub — already correctly set up in base image.
+GITHUB_TOKEN is NOT needed in the instance-layer (already used in base build).
+
+## Project layout & import paths
+- setuptools project; packages: `torchtune` and `recipes` at repo root
+- CORRECT imports: `from torchtune.xxx import Y`, `from recipes.xxx import Y`
+- WRONG imports: `from src.torchtune.xxx import Y`
+- 159 existing test files under `tests/`
+- Key deps: torchdata, liger-kernel, datasets, huggingface_hub, safetensors, sentencepiece, tiktoken
+
+## eval.sh pattern (MUST follow exactly)
+```bash
+#!/bin/bash
+set -uxo pipefail
+cd /testbed
+mkdir -p <parent_dir_of_test_file>      # ensure test dir exists before patch apply
+git apply --no-index -v - <<'EOF_PATCH'
+[CONTENT OF TEST PATCH]
+EOF_PATCH
+pytest tests/ -v --without-integration
+rc=$?
+echo "OMNIGRIL_EXIT_CODE=$rc"
+```
+IMPORTANT: Use `pytest` directly (it is on PATH via pip). Do NOT use `uv run`. Do NOT source activate.
+""",
+    ),
 }
+
+# Resolve docker/ directory relative to this file so it works from any cwd.
+_DOCKER_DIR = pathlib.Path(__file__).parent.parent.parent / "docker"
 
 
 def get_repo_env_template(repo_name: str) -> str:
-    """Return repo-specific env template string, or empty string if not found."""
-    return REPO_ENV_TEMPLATES.get(repo_name, "")
+    """Return repo-specific env template string, or empty string if not found.
+
+    The base-image section is loaded live from docker/<Dockerfile> so the
+    prompt always reflects the actual file on disk.
+    """
+    config = _REPO_ENV_CONFIG.get(repo_name)
+    if config is None:
+        return ""
+
+    base_tag, dockerfile_name, instance_guidance = config
+    dockerfile_path = _DOCKER_DIR / dockerfile_name
+
+    try:
+        base_dockerfile_content = dockerfile_path.read_text(encoding="utf-8").rstrip()
+    except OSError:
+        base_dockerfile_content = f"(could not read {dockerfile_path})"
+
+    return (
+        f"### Repo Environment: {repo_name}\n\n"
+        f"## Base image `{base_tag}` — raw Dockerfile content\n"
+        f"Everything below is ALREADY done in the base image. "
+        f"Do NOT repeat it in the instance-layer Dockerfile.\n\n"
+        f"```dockerfile\n{base_dockerfile_content}\n```\n\n"
+        f"{instance_guidance}"
+    )
 
 
 # ===========================================================================
@@ -653,82 +651,32 @@ You may emit multiple `<test_file ...>` blocks if you want to create more than o
 Do NOT wrap the content in diff syntax — write plain source code only.
 """
 
-TEST_SYSTEM_PROMPT_PYTHON = """You are a Test Agent for SWE-bench instance construction. Your ONLY job is to write test files that validate whether a bug fix has been correctly applied.
+TEST_SYSTEM_PROMPT_PYTHON = """You are a Test Agent for SWE-bench instance construction. Write pytest test files that validate a code change.
 
-A Docker environment has already been built and verified — the codebase is checked out at the correct commit with all dependencies installed. You do not need to worry about environments, Dockerfiles, or installation. Focus entirely on writing high-quality tests.
+The Docker environment is already built — the repo is at `/testbed` at the correct commit with all dependencies installed.
 
-You will receive:
-- **Problem statement**: The description of the issue or feature being addressed.
-- **Patch content**: The code changes (unified diff) made to resolve the issue.
-- **Repository info**: Basic information about the target repository.
-- **Guidance** (if available): Feedback from a test analysis agent on how to improve previously generated tests.
+## Two test categories (both required)
 
-## Core Concepts
+**F2P (Fail-to-Pass)** — prefix `test_f2p_` — **write 3–4 tests**:
+- FAIL on `base_commit` (before fix/feature)
+- PASS after the gold patch is applied
+- Prove the bug existed OR the feature was missing
 
-**FAIL_TO_PASS (F2P) tests**:
-- FAIL on `base_commit` (bug is present)
-- PASS after `gold_patch` is applied (bug is fixed)
-- These prove the bug existed and the fix resolves it
-- Prefix with `test_f2p_`
+**P2P (Pass-to-Pass)** — prefix `test_p2p_` — **write 3–4 tests**:
+- PASS both before and after the patch
+- Prove the change doesn't break related functionality
 
-**PASS_TO_PASS (P2P) tests**:
-- PASS on `base_commit` (before fix)
-- PASS after `gold_patch` is applied (after fix)
-- These prove the fix doesn't break related functionality
-- Prefix with `test_p2p_`
+## Rules
 
-## Test Writing Rules
-
-### Understanding the Bug
-1. Read the issue description to understand the SYMPTOMS
-2. Read the gold patch to understand the ROOT CAUSE
-3. Your F2P test must trigger the exact code path the patch modifies
-4. Ask yourself: "If someone reverts this patch, will my test fail?" — if not, your test is too weak
-
-### Writing F2P Tests
-- Reproduce the bug as directly and minimally as possible
-- Test observable behavior (output, return value, exception type), not internal state
-- If the bug is "function X crashes with input Y", your test should call X(Y) and assert it doesn't crash
-- If the bug is "function X returns wrong result", your test should assert the correct result
-- Keep tests small — one bug behavior per test function
-- Aim for 1-3 F2P tests
-
-### Writing P2P Tests
-- Cover functionality closely RELATED to the patched code that should continue working
-- Think: "What could this patch accidentally break?"
-- Look at what functions/classes the patch touches and test their normal (non-buggy) usage
-- Aim for 2-5 P2P tests
-
-### Style and Conventions
-- Match the project's existing test style (framework, naming, imports)
-- Use the SAME import patterns as existing tests in the project
-- Include a docstring in each test explaining what it verifies
-- Tests must be independent — no shared mutable state, no required execution order
-- No external resources (network, files outside `/testbed`, databases) unless the project itself requires them
-
-### Critical Rules
-- **No over-mocking**: Do NOT mock the function or class that the patch is fixing. The F2P test must call the real implementation. Only mock external dependencies (network, file I/O, third-party APIs).
-- **Monorepo import paths**: Python imports are resolved relative to where pytest runs, NOT the repo root. Strip monorepo prefixes (e.g. `apps/miroflow-agent/src/core/foo.py` → `from src.core.foo import Foo`). Directory names with hyphens cannot be used in import paths.
-- **All tests must be directly relevant** to the patch — do NOT generate tests targeting unrelated functions or modules not mentioned in the patch.
-""" + _TEST_SHARED_FILE_FORMAT + """
-Example:
-<test_file path="tests/test_fix_issue.py">
-import pytest
-from mymodule import my_function
-
-# --- F2P: tests that should fail before patch, pass after ---
-def test_f2p_returns_correct_value():
-    \"\"\"Bug: my_function returns X instead of Y for input 42.\"\"\"
-    result = my_function(42)
-    assert result == expected_value, f"Expected {expected_value}, got {result}"
-
-# --- P2P: regression tests that should always pass ---
-def test_p2p_handles_edge_case():
-    \"\"\"Verifies my_function still handles zero input correctly.\"\"\"
-    result = my_function(0)
-    assert result is not None
-</test_file>
-"""
+- **Classify first**: is the patch a bug fix (wrong output) or new feature (missing attribute/param)?
+  - Bug fix → assert the EXACT correct value the fixed code returns
+  - New feature → call the new API; test naturally fails pre-patch (AttributeError/TypeError) and passes post-patch
+- **No over-mocking**: never mock the function/class the patch is fixing; only mock external I/O
+- **Concrete assertions**: `assert result == specific_value`, not `assert result` or `assert result is not None`
+- **Import paths**: use the module path relative to the package root, not to the repo root. The repo environment template (provided separately) specifies the exact import style for this repo.
+- **Relevance**: only test code mentioned in the patch
+- Apply any guidance from the test_analysis_agent precisely
+""" + _TEST_SHARED_FILE_FORMAT
 
 TEST_SYSTEM_PROMPT_JAVASCRIPT = """You are a Test Agent for SWE-bench instance construction. Your ONLY job is to write JavaScript test files (using Jest or Mocha) that validate whether a bug fix has been correctly applied.
 
@@ -856,20 +804,11 @@ def get_test_system_prompt(language: str) -> str:
 
 TEST_USER_PROMPT = """Generate test files for the following pull request.
 
-## Environment Info
-
-- **Docker image**: already built and verified
-- **Repo location**: `/testbed`
-- **Test framework**: pytest (or match the project's existing framework)
-
-## Repository Info
-{repo_info}
-
 ## Instance Info
 - **Instance ID**: `{instance_id}`
 - **Base commit**: `{base_commit}`
 
-## Problem Statement (Issue)
+## Problem Statement
 ```
 {problem_statement}
 ```
@@ -879,54 +818,57 @@ TEST_USER_PROMPT = """Generate test files for the following pull request.
 {patch_content}
 ```
 
-## Existing Tests (if any — match this import style)
+## Existing Tests (match this import style if provided)
 {existing_tests}
 
 ---
 
-Based on the above, generate test file(s) using `<test_file path="...">` tags (plain file content, no diff syntax).
+**Before writing**, reason through these steps:
+1. Is this a **bug fix** or **new feature**? (Does the patch add new functions/params, or fix existing logic?)
+2. Which exact function/method/class does the patch modify or add?
+3. At `base_commit`, what does that code do for a concrete input? (wrong value, crash, AttributeError, TypeError?)
+4. After the patch, what does it return/do for that same input?
+5. What assertion FAILS on pre-patch behavior and PASSES on post-patch behavior?
 
-**You MUST generate two categories of tests:**
-1. **F2P (Fail-to-Pass)**: Tests that FAIL on `base_commit` (bug present) and PASS after the patch. Prefix with `test_f2p_`.
-2. **P2P (Pass-to-Pass)**: Regression tests that PASS both before and after the patch. Prefix with `test_p2p_`.
-
-**Rules:**
-- All tests must be directly relevant to the patch — do NOT test unrelated functions.
-- If existing tests are provided, generate **additional** complementary tests only — do NOT duplicate existing coverage.
-- Make sure test file paths are reasonable for the repository structure.
-- Do NOT mock the function or class the patch is fixing — call the real implementation.
-- For monorepos: strip the subdirectory prefix from import paths (e.g. `apps/miroflow-agent/src/core/foo.py` → `from src.core.foo import Foo`).
+Then generate test file(s) using `<test_file path="...">` tags.
+You MUST produce **3–4 F2P tests** and **3–4 P2P tests**.
 """
 
 
-TEST_REFLEXION_CRITIQUE_PROMPT = """You are reviewing auto-generated test files for quality. Analyze the following generated tests and provide a detailed critique.
+TEST_REFLEXION_CRITIQUE_PROMPT = """Review the following auto-generated tests for quality.
 
 ### Problem Statement:
 {problem_statement}
 
-### Gold Patch (code changes):
+### Gold Patch:
 {patch_content}
 
-### Generated Test Patch:
+### Generated Tests:
 {test_patch}
 
-### Review Criteria:
-1. **F2P correctness**: Would the F2P tests actually FAIL on the code BEFORE the patch? Do they test the exact behavior that the patch changes?
-2. **P2P correctness**: Would the P2P tests actually PASS both before and after the patch? Are they testing stable, related behavior?
-3. **Relevance**: Are ALL tests directly related to the PR and its issues? Flag any tests targeting unrelated functions.
-4. **Import paths**: Do the import paths match the actual repository structure visible in the patch? For monorepos, verify the prefix is stripped correctly (e.g. `apps/miroflow-agent/src/foo.py` → `from src.foo import ...`).
-5. **Over-mocking**: Do the F2P tests mock the very function or class being patched? If so, the test is broken — it will pass regardless of the actual code. F2P tests must call the real implementation of the patched code.
-6. **Determinism**: Are tests free of randomness, timing dependencies, or external service calls?
-7. **Edge cases**: Are important edge cases covered?
-Provide your critique as structured text. If the tests are high-quality and no changes are needed, explicitly say "TESTS_APPROVED".
+### Review each F2P test — answer all three questions:
+1. What does the code at `base_commit` actually do for the test's input? (trace the pre-patch logic)
+2. Does the assertion FAIL on that pre-patch behavior? (if not, the test is too weak)
+3. Does the assertion PASS after the patch? (expected value must match post-patch output)
+
+### Also check:
+- **Count**: are there 3–4 F2P tests and 3–4 P2P tests? Flag if fewer than 3 of either category.
+- **Over-mocking**: does any F2P test mock the exact function the patch fixes? → broken, must call real code
+- **Weak assertions**: `assert result is not None`, `assert result`, `assert len > 0` → flag and suggest exact value
+- **Wrong target**: does the test call a different function than what the patch changes? → fix the import/call
+- **Import paths**: for monorepos, hyphens in dir names are invalid; strip subdirectory prefix correctly
+- **P2P validity**: would P2P tests pass on the pre-patch code too?
+
+If all F2P tests would genuinely fail pre-patch and pass post-patch, say "TESTS_APPROVED".
+Otherwise provide specific, actionable fixes for each issue found.
 """
 
-TEST_REFLEXION_REFINE_PROMPT = """Based on the following critique of the generated tests, produce an improved version.
+TEST_REFLEXION_REFINE_PROMPT = """Fix the tests based on the critique below. Address every issue raised.
 
 ### Critique:
 {critique}
 
-### Original Generated Test Patch:
+### Current Tests:
 {test_patch}
 
 ### Problem Statement:
@@ -935,11 +877,11 @@ TEST_REFLEXION_REFINE_PROMPT = """Based on the following critique of the generat
 ### Gold Patch:
 {patch_content}
 
-Generate improved test files using `<test_file path="...">` tags (plain file content, no diff syntax). Address every issue raised in the critique. Ensure:
-- F2P tests truly fail before the patch and pass after
-- P2P tests truly pass both before and after
-- All tests are relevant to the PR
-- Import paths are correct
+For each F2P test you write, confirm:
+- Pre-patch: the assertion FAILS (buggy output or missing feature)
+- Post-patch: the assertion PASSES (correct output or feature works)
+
+Use concrete assertions (`assert result == exact_value`). Generate improved test files using `<test_file path="...">` tags.
 """
 
 
