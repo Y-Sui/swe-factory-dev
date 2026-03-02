@@ -31,7 +31,9 @@ def copy_to_container(container: Container, src: Path, dst: Path):
     # temporary tar file
     tar_path = src.with_suffix(".tar")
     with tarfile.open(tar_path, "w") as tar:
-        tar.add(src, arcname=src.name)
+        # Preserve the requested destination filename inside the archive.
+        # This matters when src and dst names differ (e.g. gold_patch.diff -> /tmp/patch.diff).
+        tar.add(src, arcname=dst.name)
 
     # get bytes for put_archive cmd
     with open(tar_path, "rb") as tar_file:

@@ -342,15 +342,21 @@ Do NOT add `ENV PATH=...` — call pytest via `.venv/bin/pytest` (see eval.sh pa
 #!/bin/bash
 set -uxo pipefail
 cd /testbed
-mkdir -p tests                           # ensure test dir exists before patch apply
-git apply --no-index -v - <<'EOF_PATCH'
-[CONTENT OF TEST PATCH]
-EOF_PATCH
-.venv/bin/pytest tests/ -v
+mkdir -p tests                           # ensure test dir exists
+cat <<'EOF_TEST_0' > "tests/test_example.py"
+[TEST FILE CONTENT]
+EOF_TEST_0
+if [ ! -x ".venv/bin/pytest" ]; then
+  uv pip install pytest pytest-asyncio
+fi
+.venv/bin/pytest tests/ -v --override-ini="addopts="
 rc=$?
 echo "OMNIGRIL_EXIT_CODE=$rc"
 ```
-IMPORTANT: Use `.venv/bin/pytest` directly — `uv run pytest` may create a new venv and lose installed packages.
+IMPORTANT: Use `cat` heredocs to write each test file directly (one `cat` per file).
+Use `.venv/bin/pytest` directly — `uv run pytest` may create a new venv and lose installed packages.
+Do NOT use `git apply` — use `cat` heredocs instead.
+Always pass `--override-ini="addopts="` to prevent repo-level pytest addopts from forcing xdist/cov plugins.
 """,
     ),
 
@@ -365,9 +371,10 @@ WORKDIR /testbed
 RUN git checkout <commit> && git clean -fd
 WORKDIR /testbed/apps/miroflow-agent
 RUN uv sync                              # re-syncs if deps changed; does NOT recreate venv
+RUN uv pip install pytest pytest-asyncio # ensure test deps present
 ```
 CRITICAL: Do NOT run `uv venv` — the `.venv` already exists at `/testbed/apps/miroflow-agent/.venv`.
-Do NOT add `ENV PATH=...` — use `uv run pytest` to invoke pytest.
+Do NOT add `ENV PATH=...` — call pytest via `.venv/bin/pytest` (see eval.sh pattern).
 
 ## Project layout & import paths
 - `apps/miroflow-agent/pyproject.toml`: `[tool.hatch.build.targets.wheel] packages = ["src"]`
@@ -382,15 +389,21 @@ Do NOT add `ENV PATH=...` — use `uv run pytest` to invoke pytest.
 #!/bin/bash
 set -uxo pipefail
 cd /testbed/apps/miroflow-agent
-mkdir -p tests                           # ensure test dir exists before patch apply
-git apply --no-index -v - <<'EOF_PATCH'
-[CONTENT OF TEST PATCH]
-EOF_PATCH
-.venv/bin/pytest tests/ -v
+mkdir -p tests                           # ensure test dir exists
+cat <<'EOF_TEST_0' > "tests/test_example.py"
+[TEST FILE CONTENT]
+EOF_TEST_0
+if [ ! -x ".venv/bin/pytest" ]; then
+  uv pip install pytest pytest-asyncio
+fi
+.venv/bin/pytest tests/ -v --override-ini="addopts="
 rc=$?
 echo "OMNIGRIL_EXIT_CODE=$rc"
 ```
-IMPORTANT: Use `.venv/bin/pytest` directly — `uv run pytest` may create a new venv and lose installed packages.
+IMPORTANT: Use `cat` heredocs to write each test file directly (one `cat` per file).
+Use `.venv/bin/pytest` directly — `uv run pytest` may create a new venv and lose installed packages.
+Do NOT use `git apply` — use `cat` heredocs instead.
+Always pass `--override-ini="addopts="` to prevent repo-level pytest addopts from forcing xdist/cov plugins.
 """,
     ),
 
@@ -406,6 +419,7 @@ RUN git checkout <commit> && git clean -fd
 # Re-apply the torchao compatibility fix after checkout (git clean resets tracked files)
 RUN sed -i 's/from torchao.utils import TORCH_VERSION_AFTER_2_4/from torchao.utils import torch_version_at_least; TORCH_VERSION_AFTER_2_4 = torch_version_at_least("2.4.0")/' /testbed/tests/recipes/test_configs.py
 RUN pip install --no-cache-dir -e ".[dev]"
+RUN pip install pytest pytest-asyncio    # ensure test deps present
 ```
 Do NOT reinstall torch, torchao, or transformers — already in base image.
 Do NOT modify the flash_attn stub — already correctly set up in base image.
@@ -423,15 +437,18 @@ GITHUB_TOKEN is NOT needed in the instance-layer (already used in base build).
 #!/bin/bash
 set -uxo pipefail
 cd /testbed
-mkdir -p <parent_dir_of_test_file>      # ensure test dir exists before patch apply
-git apply --no-index -v - <<'EOF_PATCH'
-[CONTENT OF TEST PATCH]
-EOF_PATCH
-pytest tests/ -v --without-integration
+mkdir -p <parent_dir_of_test_file>      # ensure test dir exists
+cat <<'EOF_TEST_0' > "tests/test_example.py"
+[TEST FILE CONTENT]
+EOF_TEST_0
+pytest tests/ -v --without-integration --override-ini="addopts="
 rc=$?
 echo "OMNIGRIL_EXIT_CODE=$rc"
 ```
-IMPORTANT: Use `pytest` directly (it is on PATH via pip). Do NOT use `uv run`. Do NOT source activate.
+IMPORTANT: Use `cat` heredocs to write each test file directly (one `cat` per file).
+Use `pytest` directly (it is on PATH via pip). Do NOT use `uv run`. Do NOT source activate.
+Do NOT use `git apply` — use `cat` heredocs instead.
+Always pass `--override-ini="addopts="` to prevent repo-level pytest addopts from forcing xdist/cov plugins.
 """,
     ),
 }
@@ -498,7 +515,8 @@ The script must execute the provided test files inside the specified Docker envi
 1. **Activate the environment**: Ensure the correct environment (e.g., Conda, venv) is activated before running the tests.
 2. **Apply the test patch (if required)**: The test patch may need to be applied before running the tests.
 3. **Execute the given test files** using the correct command found by the context retrieval agent.
-4. **Ensure proper cleanup**: After running the tests, any modified files should be reset.
+4. **Do NOT reset tracked files in eval.sh unless absolutely required for listed test files.**
+   - Avoid `git checkout ...` on source files: it can silently undo Dockerfile hotfixes needed by the environment.
 
 ### Important Notes:
 1. You must **execute only the specified target test files**, rather than running all tests in the repository.
@@ -518,13 +536,12 @@ The script must execute the provided test files inside the specified Docker envi
    - Use **a simple, minimalistic structure** similar to the reference eval script to ensure clarity and maintainability.
    - The script should be easy to modify and extend without unnecessary complexity.
 
-5. **The actual test patch content is omitted here for brevity (marked with [CONTENT OF TEST PATCH] placeholder).**
-    - You must generate the complete git apply command structure, including the heredoc syntax with delimiter (EOF_114329324912).
-    - The placeholder will be programmatically replaced with the actual patch content during script execution.
-    - Example structure:
-    git apply --no-index -v - <<'EOF_114329324912'\\n[CONTENT OF TEST PATCH]\\nEOF_114329324912
+5. **Test files are written via `cat` heredocs (one per file).** The placeholder content `[TEST FILE CONTENT]` will be programmatically replaced with the actual file content.
+    - Use `cat <<'EOF_TEST_N' > "path/to/test.py"` for each test file.
+    - Do NOT use `git apply` — always use `cat` heredocs to write test files directly.
 
 6. You MUST capture the exit code immediately after running the tests using `rc=$?`, and then echo: `OMNIGRIL_EXIT_CODE=$rc`. This ensures the judge can determine whether the tests passed successfully.
+7. For pytest commands, include `--override-ini="addopts="` to neutralize repo-level addopts (e.g., `-n=auto`, `--cov`) that can destabilize evaluation.
 
 Eval script skeleton:
 {eval_script_skeleton}
@@ -540,18 +557,16 @@ conda activate testbed
 cd /testbed
 pip install -r test-requirements.txt && pip install -e .
 
-git checkout 6de254ef00f99ce5284ab947f2dd1179db6d28f6 "test-data/unit/check-functions.test" "test-data/unit/check-redefine.test"
-
-# Required: apply test patch to update target tests
-git apply --no-index -v - <<'EOF_114329324912'
-[CONTENT OF TEST PATCH]
-EOF_114329324912
+# Required: write test files directly
+mkdir -p "mypy/test"
+cat <<'EOF_TEST_0' > "mypy/test/testcheck.py"
+[TEST FILE CONTENT]
+EOF_TEST_0
 
 # Required: run target tests files instead of all tests!
-pytest --no-header -rA --tb=no -p no:cacheprovider -n4 mypy/test/testcheck.py::TypeCheckSuite::check-functions.test mypy/test/testcheck.py::TypeCheckSuite::check-redefine.test
+pytest --no-header -rA --tb=no -p no:cacheprovider -n4 --override-ini="addopts=" mypy/test/testcheck.py::TypeCheckSuite::check-functions.test mypy/test/testcheck.py::TypeCheckSuite::check-redefine.test
 rc=$?            #Required, save exit code
 echo "OMNIGRIL_EXIT_CODE=$rc" #Required, echo test status
-git checkout 6de254ef00f99ce5284ab947f2dd1179db6d28f6 "test-data/unit/check-functions.test" "test-data/unit/check-redefine.test"
 </script>
 """
 
@@ -563,21 +578,24 @@ The script must execute the provided test files inside the specified Docker envi
 1. **Activate the environment**: Ensure the correct environment (e.g., Conda, venv) is activated before running the tests.
 2. **Apply the test patch (if required)**: The test patch may need to be applied before running the tests.
 3. **Execute the given test files** using the correct command found by the context retrieval agent.
-4. **Ensure proper cleanup**: After running the tests, any modified files should be reset.
+4. **Do NOT reset tracked files in eval.sh unless absolutely required for listed test files.**
+   - Avoid `git checkout ...` on source files: it can silently undo Dockerfile hotfixes needed by the environment.
 
 ### Important Notes:
 1. You must **execute only the specified target test files**, rather than running all tests in the repository.
 2. **Optimize execution efficiency by combining multiple test commands into a single command** whenever possible.
 3. **Ensure that the output of the evaluation script is concise and structured**.
 4. **Follow the structure of the reference evaluation script or eval script skeleton whenever available.**
-5. **The actual test patch content is omitted here for brevity (marked with [CONTENT OF TEST PATCH] placeholder).**
-    - You must generate the complete git apply command structure, including the heredoc syntax with delimiter (EOF_114329324912).
-    - The placeholder will be programmatically replaced with the actual patch content during script execution.
+5. **Test files are written via `cat` heredocs (one per file).** The placeholder content `[TEST FILE CONTENT]` will be programmatically replaced with the actual file content.
+    - Use `cat <<'EOF_TEST_N' > "path/to/test.py"` for each test file.
+    - Do NOT use `git apply` — always use `cat` heredocs to write test files directly.
 6. You MUST capture the exit code immediately after running the tests using `rc=$?`, and then echo: `OMNIGRIL_EXIT_CODE=$rc`.
 7. Test resources to download/remove:
     - For each resource that needs to be added, use wget with the -O <path> flag to download it directly into its target location.
     - For each resource that needs to be removed, issue a `rm -f <path>` command.
     - Integrate these download/remove commands immediately after resetting the tests.
+
+8. For pytest commands, include `--override-ini="addopts="` to neutralize repo-level addopts (e.g., `-n=auto`, `--cov`) that can destabilize evaluation.
 
 Eval script skeleton:
 {eval_script_skeleton}
@@ -593,22 +611,20 @@ conda activate testbed
 cd /testbed
 pip install -r test-requirements.txt && pip install -e .
 
-git checkout 6de254ef00f99ce5284ab947f2dd1179db6d28f6 "test-data/unit/check-functions.test" "test-data/unit/check-redefine.test"
-
 # Required: download and remove test_resources
 wget -O /testbed/test/xmp_no_prefix.jpg https://raw.githubusercontent.com/owner/python/mypy/xxxx/head/test/xmp_no_prefix.jpg || exit 1
 rm -f /testbed/test/xmp_no_prefix_old.jpg
 
-# Required: apply test patch to update target tests
-git apply --no-index -v - <<'EOF_114329324912'
-[CONTENT OF TEST PATCH]
-EOF_114329324912
+# Required: write test files directly
+mkdir -p "mypy/test"
+cat <<'EOF_TEST_0' > "mypy/test/testcheck.py"
+[TEST FILE CONTENT]
+EOF_TEST_0
 
 # Required: run target tests files instead of all tests!
-pytest --no-header -rA --tb=no -p no:cacheprovider -n4 mypy/test/testcheck.py::TypeCheckSuite::check-functions.test mypy/test/testcheck.py::TypeCheckSuite::check-redefine.test
+pytest --no-header -rA --tb=no -p no:cacheprovider -n4 --override-ini="addopts=" mypy/test/testcheck.py::TypeCheckSuite::check-functions.test mypy/test/testcheck.py::TypeCheckSuite::check-redefine.test
 rc=$?            #Required, save exit code
 echo "OMNIGRIL_EXIT_CODE=$rc" #Required, echo test status
-git checkout 6de254ef00f99ce5284ab947f2dd1179db6d28f6 "test-data/unit/check-functions.test" "test-data/unit/check-redefine.test"
 </script>
 """
 
@@ -674,6 +690,14 @@ The Docker environment is already built — the repo is at `/testbed` at the cor
 - **No over-mocking**: never mock the function/class the patch is fixing; only mock external I/O
 - **Concrete assertions**: `assert result == specific_value`, not `assert result` or `assert result is not None`
 - **Import paths**: use the module path relative to the package root, not to the repo root. The repo environment template (provided separately) specifies the exact import style for this repo.
+- **`packages = ["src"]` rule**: if the template says this, strip `src/` from import paths.
+  - Example: file `.../src/core/pipeline.py` → import `from core.pipeline import ...`
+  - Never import with `from src...` and never prefix imports with the repo name.
+- **Nested/private symbols**: if a target function is nested inside another function or otherwise not importable, test it through the public callable that executes that logic, or use AST extraction to test the actual source. Strategies:
+  1. **AST extraction** (preferred for simple nested functions): use `ast.get_source_segment()` + `textwrap.dedent()` + `exec()` to extract the nested function from the source file and test it directly with a lightweight stand-in for its dependencies.
+  2. **End-to-end through public API**: call the enclosing public function with appropriate mocking of I/O and external dependencies to reach the nested code path.
+  3. **Monkeypatch to capture**: if the nested function is passed as a callback, monkeypatch the receiver to capture and test the function.
+- **NEVER simulate patch logic inline**: Do NOT create mock/simulated versions of the patched function inside the test file and test those. Your test MUST exercise the ACTUAL source code from the repository. If your test would produce the same result whether or not the gold patch is applied to the repo, your test is useless — it will be classified PASS2PASS or FAIL2FAIL.
 - **Relevance**: only test code mentioned in the patch
 - Apply any guidance from the test_analysis_agent precisely
 """ + _TEST_SHARED_FILE_FORMAT
@@ -854,6 +878,7 @@ TEST_REFLEXION_CRITIQUE_PROMPT = """Review the following auto-generated tests fo
 ### Also check:
 - **Count**: are there 3–4 F2P tests and 3–4 P2P tests? Flag if fewer than 3 of either category.
 - **Over-mocking**: does any F2P test mock the exact function the patch fixes? → broken, must call real code
+- **Self-contained simulation** (CRITICAL): does any test define its own version of the patched function (e.g., `_parse_func_base`, `_parse_func_patched`) and test that instead of the actual source code? If removing the gold patch from the repo would NOT change the test outcome, the test is fatally broken — it must import/extract/call the REAL code from the repository files.
 - **Weak assertions**: `assert result is not None`, `assert result`, `assert len > 0` → flag and suggest exact value
 - **Wrong target**: does the test call a different function than what the patch changes? → fix the import/call
 - **Import paths**: for monorepos, hyphens in dir names are invalid; strip subdirectory prefix correctly

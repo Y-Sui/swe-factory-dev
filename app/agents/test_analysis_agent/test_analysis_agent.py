@@ -64,6 +64,14 @@ class TestAnalysisAgent(Agent):
         self._cached_dockerfile: str | None = None   # dockerfile content used for that build
         # self.init_msg_thread()
 
+    def _get_clean_command(self) -> str:
+        """Return a repo-aware git clean command that preserves uv virtualenvs."""
+        if self.task.repo_name == "MiroMindAI/miroflow":
+            return "git clean -fdx -e .venv"
+        if self.task.repo_name == "MiroMindAI/MiroThinker":
+            return "git clean -fdx -e .venv -e apps/miroflow-agent/.venv"
+        return "git clean -fdx"
+
 
 
     def init_msg_thread(self) -> None:
@@ -469,7 +477,7 @@ class TestAnalysisAgent(Agent):
                 user="root",
             )
             container.exec_run(
-                "git clean -fdx",
+                self._get_clean_command(),
                 workdir="/testbed",
                 user="root",
             )

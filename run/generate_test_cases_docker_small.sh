@@ -34,8 +34,9 @@ fi
 SCRIPT_DIR="data_collection/collect"
 DATA_DIR="/data/yuansui/internal-swe-bench-data"
 SETUP_DIR="testbed"
-MODEL="anthropic/claude-opus-4.1"
+# MODEL="anthropic/claude-opus-4.1"
 # MODEL="google/gemini-2.5-flash"
+MODEL="anthropic/claude-opus-4.6"
 ROUND=3
 NUM_PROCS=5
 MAX_INSTANCES=1

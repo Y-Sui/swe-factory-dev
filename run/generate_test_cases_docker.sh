@@ -32,15 +32,15 @@ fi
 SCRIPT_DIR="data_collection/collect"
 DATA_DIR="/data/yuansui/internal-swe-bench-data"
 SETUP_DIR="testbed"
-# MODEL="anthropic/claude-sonnet-4.5"
-MODEL="google/gemini-2.5-flash"
-ROUND=5
-NUM_PROCS=8
+MODEL="anthropic/claude-opus-4.6"
+# MODEL="google/gemini-2.5-flash"
+ROUND=6
+NUM_PROCS=30
 
 REPOS=(
   "MiroMindAI__MiroThinker"
   "MiroMindAI__miroflow"
-  "MiroMindAI__sd-torchtune"
+  # "MiroMindAI__sd-torchtune"
 )
 
 # Step 1: Add version info to instances (modifies file in-place)

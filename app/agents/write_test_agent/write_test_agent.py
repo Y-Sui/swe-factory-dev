@@ -39,6 +39,7 @@ class WriteTestAgent(Agent):
         self.run_count = 0
         self.generated_test_patch: str | None = None
         self.generated_test_files = []
+        self.generated_test_file_contents: dict[str, str] = {}
         # Select language-specific system prompt
         self._language = getattr(task, "language", "python") or "python"
         self.pending_guidance: str | None = None
@@ -74,6 +75,7 @@ class WriteTestAgent(Agent):
         self.run_count += 1
         curr_dir = self.get_latest_write_output_dir()
         os.makedirs(curr_dir, exist_ok=True)
+        self.generated_test_file_contents = {}
 
         # Summarize patch if too large
         patch_content = write_test_utils.summarize_large_patch(self.task.patch)
@@ -94,9 +96,10 @@ class WriteTestAgent(Agent):
         self.add_user_message(user_prompt)
 
         # --- Phase 1: Initial test generation with retries ---
-        result_msg, patch_str, test_files, success = write_test_utils.write_test_with_retries(
+        result_msg, patch_str, test_files, test_file_contents, success = write_test_utils.write_test_with_retries(
             self.msg_thread,
             curr_dir,
+            repo_root=self.task.project_path,
             retries=3,
             print_callback=print_callback,
         )
@@ -104,21 +107,25 @@ class WriteTestAgent(Agent):
         # --- Phase 2: Reflexion loop to improve test quality ---
         if success and patch_str and self.max_reflexion_rounds > 0:
             logger.info(f"Starting reflexion loop ({self.max_reflexion_rounds} rounds) to refine tests.")
-            refined_patch, refined_files = write_test_utils.refine_tests_with_reflexion(
+            refined_patch, refined_files, refined_file_contents = write_test_utils.refine_tests_with_reflexion(
                 msg_thread=self.msg_thread,
                 generated_patch=patch_str,
                 problem_statement=self.task.problem_statement,
                 code_patch=self.task.patch,
                 output_dir=curr_dir,
+                repo_root=self.task.project_path,
+                test_file_contents=test_file_contents,
                 max_rounds=self.max_reflexion_rounds,
                 print_callback=print_callback,
             )
             patch_str = refined_patch
             test_files = refined_files
+            test_file_contents = refined_file_contents
 
         if success and patch_str:
             self.generated_test_patch = patch_str
             self.generated_test_files = test_files
+            self.generated_test_file_contents = test_file_contents
             logger.info(f"Generated test patch with {len(test_files)} test file(s): {test_files}")
 
         summary = (
@@ -137,3 +144,6 @@ class WriteTestAgent(Agent):
 
     def get_generated_test_files(self) -> list[str]:
         return self.generated_test_files
+
+    def get_generated_test_file_contents(self) -> dict[str, str]:
+        return self.generated_test_file_contents

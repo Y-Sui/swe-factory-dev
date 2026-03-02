@@ -577,9 +577,9 @@ class ClaudeOpus4_6(OpenaiModel):
     def __init__(self):
         super().__init__(
             "anthropic/claude-opus-4.6",
-            8192,
-            0.000015,
-            0.000075,
+            32768,
+            0.000005,
+            0.000025,
             parallel_tool_call=True,
         )
         self.note = "Claude Opus 4.6 via OpenRouter"

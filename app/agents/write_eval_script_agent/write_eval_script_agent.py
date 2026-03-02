@@ -10,6 +10,7 @@ from os.path import join as pjoin
 from loguru import logger
 
 DIFF_MODIFIED_FILE_REGEX = r"--- a/(.*)"
+DIFF_NEW_FILE_REGEX = r"\+\+\+ b/(.*)"
 
 
 class WriteEvalScriptAgent(Agent):
@@ -25,6 +26,7 @@ class WriteEvalScriptAgent(Agent):
         self.test_patch = self.task.test_patch
         self.test_files = self.get_test_files()
         self.generated_test_files = []
+        self.test_files_content: dict[str, str] = {}
         self.initial_skeleton = self.get_initial_eval_script_skeleton()
         self.run_count = 0
         self.repo_basic_info = repo_basic_info
@@ -34,7 +36,14 @@ class WriteEvalScriptAgent(Agent):
 
     def get_test_files(self):
         patch = self.test_patch or ""
-        return re.findall(DIFF_MODIFIED_FILE_REGEX, patch)
+        # Match modified files (--- a/path) — excludes /dev/null for new files
+        modified = [p.split("\t")[0] for p in re.findall(DIFF_MODIFIED_FILE_REGEX, patch)
+                    if not p.startswith("/dev/null")]
+        # Match new files (+++ b/path) — this captures files added from /dev/null
+        new_files = [p.split("\t")[0] for p in re.findall(DIFF_NEW_FILE_REGEX, patch)
+                     if not p.startswith("/dev/null")]
+        # Deduplicate while preserving order (modified files appear in both --- and +++)
+        return list(dict.fromkeys(modified + new_files))
 
     def init_msg_thread(self) -> None:
         self.msg_thread = MessageThread()
@@ -45,35 +54,24 @@ class WriteEvalScriptAgent(Agent):
         return os.path.join(self.output_dir, f"write_eval_script_agent_{self.run_count}")
 
     def get_initial_eval_script_skeleton(self):
-        HEREDOC_DELIMITER = "EOF_114329324912"
-        test_files = self.test_files
+        test_files = list(dict.fromkeys(list(self.test_files_content.keys()) + self.test_files))
 
-        apply_test_patch_command = (
-            f"git apply -v - <<'{HEREDOC_DELIMITER}'\n[CONTENT OF TEST PATCH]\n{HEREDOC_DELIMITER}"
-        )
-
-        gen_set = set(self.generated_test_files)
-        existing_files = [f for f in test_files if f not in gen_set]
-        generated_files = [f for f in test_files if f in gen_set]
-        quoted_existing = ['"' + t + '"' for t in existing_files]
-        quoted_generated = ['"' + t + '"' for t in generated_files]
-        gen_dirs = sorted({os.path.dirname(f) for f in generated_files if os.path.dirname(f)})
-        quoted_gen_dirs = ['"' + d + '"' for d in gen_dirs]
+        # Collect directories needed for all test files
+        all_dirs = sorted({os.path.dirname(f) for f in test_files if os.path.dirname(f)})
+        quoted_dirs = ['"' + d + '"' for d in all_dirs]
 
         eval_commands = ["cd /testbed"]
 
-        if quoted_existing:
-            eval_commands.append(f"git checkout {self.task.commit} {' '.join(quoted_existing)}")
+        if quoted_dirs:
+            eval_commands.append("mkdir -p " + " ".join(quoted_dirs))
 
-        if quoted_gen_dirs:
-            eval_commands.append("mkdir -p " + " ".join(quoted_gen_dirs))
+        # Write test files via cat heredocs (content injected by post-processor)
         if self.test_patch and self.test_patch.strip():
-            eval_commands.append(apply_test_patch_command)
-
-        if quoted_existing:
-            eval_commands.append(f"git checkout {self.task.commit} {' '.join(quoted_existing)}")
-        if quoted_generated:
-            eval_commands.append("rm -f " + " ".join(quoted_generated))
+            for i, f in enumerate(test_files):
+                delim = f"EOF_TEST_{i}"
+                eval_commands.append(f"cat <<'{delim}' > \"{f}\"")
+                eval_commands.append("[TEST FILE CONTENT]")
+                eval_commands.append(delim)
 
         return "\n".join(["#!/bin/bash", "set -uxo pipefail"] + eval_commands) + "\n"
 
@@ -117,12 +115,16 @@ class WriteEvalScriptAgent(Agent):
         if os.path.exists(prev_script):
             self.add_user_message(dockerfile_msg)
             msg_prev = (
-                f"Previous generated eval script skeleton (Test patch omitted because of its long length):\n"
+                f"Previous generated eval script skeleton:\n"
                 f"{self.get_latest_eval_script_skeleton()}\n\n"
+                f"Test patch that MUST be applied (do NOT modify this content):\n"
+                f"{self.test_patch}\n\n"
             )
             self.add_user_message(msg_prev)
             self.add_user_message(
                 "Please modify current eval script according to collected information. "
+                "You MUST keep the `cat` heredoc blocks that write test files. "
+                "Do NOT rewrite the test file writing mechanism. "
                 "Return modified eval script in defined format. Wrap results in <script></script>."
             )
         else:
@@ -133,6 +135,8 @@ class WriteEvalScriptAgent(Agent):
             self.msg_thread,
             curr_dir,
             self.test_patch,
+            test_files_content=self.test_files_content,
+            repo_root=self.task.project_path,
             retries=3,
             print_callback=print_callback,
         )

@@ -4,9 +4,14 @@ All prompts live in app/prompts/prompts.py.
 """
 
 import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
 from collections.abc import Callable
 from os.path import join as pjoin
-import os
+
 from loguru import logger
 
 from app.data_structures import MessageThread
@@ -16,7 +21,6 @@ from app.prompts.prompts import (
     get_eval_script_system_prompt,
     get_eval_script_user_prompt_init,
 )
-import re
 
 
 def get_system_prompt_eval_script() -> str:
@@ -31,6 +35,8 @@ def write_eval_script_with_retries(
     message_thread: MessageThread,
     output_dir: str,
     test_patch: str,
+    test_files_content: dict[str, str] | None = None,
+    repo_root: str | None = None,
     retries: int = 3,
     print_callback: Callable[[dict], None] | None = None,
 ) -> str:
@@ -70,7 +76,13 @@ def write_eval_script_with_retries(
             res_text, f"try {i} / {retries}", print_callback=print_callback
         )
 
-        script_extracted = extract_eval_script_from_response(res_text, output_dir, test_patch)
+        script_extracted = extract_eval_script_from_response(
+            res_text,
+            output_dir,
+            test_patch,
+            test_files_content=test_files_content,
+            repo_root=repo_root,
+        )
         can_stop = script_extracted
 
         if can_stop:
@@ -86,63 +98,331 @@ def write_eval_script_with_retries(
         result_msg = "Failed to extract"
     return result_msg
 
-def _fix_new_file_patch_headers(patch: str) -> str:
-    """Rewrite new-file diff headers so git apply --no-index handles them correctly.
+def parse_patch_to_files(patch: str) -> dict[str, str]:
+    """Parse only new-file diff blocks into {relative_path: file_content}.
 
-    git apply --no-index still resolves 'a/dev/null' as a relative path and
-    fails with 'error: dev/null: No such file or directory'.  The fix is to
-    rewrite the header line from:
-        diff --git a/dev/null b/<path>
-    to:
-        diff --git a//dev/null b/<path>
-    The double-slash makes git treat it as an absolute /dev/null reference,
-    which is what --no-index expects for new-file creation.
+    Modified-file reconstruction from unified diff hunks is lossy. For modified
+    files, use `_materialize_files_from_patch` instead.
     """
-    return re.sub(
-        r'^(diff --git )a/dev/null( b/)',
-        r'\1a//dev/null\2',
-        patch,
-        flags=re.MULTILINE,
+    if not patch or not patch.strip():
+        return {}
+
+    files: dict[str, str] = {}
+    chunks = re.split(r'(?m)(?=^diff --git )', patch)
+
+    for chunk in chunks:
+        if not chunk.strip():
+            continue
+        m = re.search(r'^\+\+\+ b/(.+?)(?:\t.*)?$', chunk, re.MULTILINE)
+        if not m:
+            continue
+        path = m.group(1).strip()
+        if not re.search(r'^--- /dev/null$', chunk, re.MULTILINE):
+            continue
+
+        content_lines: list[str] = []
+        in_hunk = False
+        for line in chunk.splitlines():
+            if line.startswith('@@'):
+                in_hunk = True
+                continue
+            if not in_hunk:
+                continue
+            if line.startswith('+'):
+                content_lines.append(line[1:])
+            elif line.startswith(' '):
+                content_lines.append(line[1:])
+            elif line.startswith('\\ No newline at end of file'):
+                pass
+            elif line.startswith('-'):
+                pass  # removed lines (modified files only)
+
+        if content_lines:
+            files[path] = '\n'.join(content_lines)
+
+    return files
+
+
+def _extract_target_files_from_patch(patch: str) -> list[str]:
+    files = [p.split("\t")[0] for p in re.findall(r"^\+\+\+ b/(.*)$", patch, re.MULTILINE)]
+    return list(dict.fromkeys([p for p in files if p and p != "/dev/null"]))
+
+
+def _materialize_files_from_patch(
+    patch: str,
+    repo_root: str | None,
+    scratch_dir: str | None = None,
+) -> dict[str, str]:
+    """Apply patch in a temporary git worktree and read resulting file contents."""
+    if not patch or not patch.strip() or not repo_root or not os.path.isdir(repo_root):
+        return {}
+
+    target_files = _extract_target_files_from_patch(patch)
+    if not target_files:
+        return {}
+
+    parent_tmp = tempfile.mkdtemp(prefix="eval_patch_", dir=scratch_dir)
+    worktree_dir = os.path.join(parent_tmp, "repo")
+    patch_path = os.path.join(parent_tmp, "test_patch.diff")
+    with open(patch_path, "w", encoding="utf-8") as f:
+        f.write(patch)
+
+    try:
+        add_worktree = subprocess.run(
+            ["git", "-C", repo_root, "worktree", "add", "--detach", worktree_dir, "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        if add_worktree.returncode != 0:
+            logger.warning(f"Failed to create temporary worktree: {add_worktree.stderr}")
+            return {}
+
+        apply_res = subprocess.run(
+            ["git", "-C", worktree_dir, "apply", "-p1", patch_path],
+            capture_output=True,
+            text=True,
+        )
+        if apply_res.returncode != 0:
+            fallback = subprocess.run(
+                ["patch", "--batch", "--fuzz=5", "-p1", "-i", patch_path],
+                cwd=worktree_dir,
+                capture_output=True,
+                text=True,
+            )
+            if fallback.returncode != 0:
+                logger.warning(
+                    "Failed to materialize test patch in temporary worktree.\n"
+                    f"git apply stderr:\n{apply_res.stderr}\n"
+                    f"patch stderr:\n{fallback.stderr}"
+                )
+                return {}
+
+        files: dict[str, str] = {}
+        for rel_path in target_files:
+            abs_path = os.path.join(worktree_dir, rel_path)
+            if os.path.isfile(abs_path):
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    files[rel_path] = f.read()
+        return files
+    finally:
+        subprocess.run(
+            ["git", "-C", repo_root, "worktree", "remove", "--force", worktree_dir],
+            capture_output=True,
+            text=True,
+        )
+        shutil.rmtree(parent_tmp, ignore_errors=True)
+
+
+def _generate_cat_heredoc_block(files: dict[str, str]) -> str:
+    """Generate mkdir + cat heredoc commands for writing test files directly."""
+    lines: list[str] = []
+    dirs = sorted({os.path.dirname(path) for path in files if os.path.dirname(path)})
+    if dirs:
+        lines.append("mkdir -p " + " ".join(f'"{d}"' for d in dirs))
+
+    for i, (path, content) in enumerate(files.items()):
+        delim = f"EOF_TEST_{i}"
+        lines.append(f"cat <<'{delim}' > \"{path}\"")
+        lines.append(content)
+        lines.append(delim)
+
+    return '\n'.join(lines)
+
+
+def replace_heredoc_content(
+    original_content: str,
+    test_patch: str,
+    test_files_content: dict[str, str] | None = None,
+    repo_root: str | None = None,
+    scratch_dir: str | None = None,
+) -> str:
+    """Replace cat heredoc placeholders with actual test file contents.
+
+    Parses the test_patch (unified diff) into {path: content}, then finds
+    cat heredoc blocks in the eval script and injects the real file content.
+    """
+    files = dict(test_files_content or {})
+    if not files:
+        files = _materialize_files_from_patch(test_patch, repo_root, scratch_dir)
+    if not files:
+        files = parse_patch_to_files(test_patch)
+    if not files:
+        return original_content
+
+    # Replace cat heredoc blocks for matching test file paths
+    cat_heredoc_re = re.compile(
+        r"^(cat\s+<<['\"]?(\w+)['\"]?\s*>\s*[\"']?([^\"'\n]+?)[\"']?\s*)\n[\s\S]*?\n(\2)\s*$",
+        re.MULTILINE,
     )
+    result = original_content
+    for m in reversed(list(cat_heredoc_re.finditer(result))):
+        header = m.group(1)
+        delim = m.group(2)
+        path = m.group(3).strip()
+        if path in files:
+            replacement = f"{header}\n{files[path]}\n{delim}"
+            result = result[:m.start()] + replacement + result[m.end():]
+
+    return result
 
 
-def replace_heredoc_content(original_content, test_patch):
-    """Replace heredoc placeholder with actual test_patch content.
-    Also ensures git apply uses --no-index and fixes new-file patch headers
-    so patches adding new files (--- /dev/null) apply cleanly.
-    """
-    # Fix new-file diff headers before embedding the patch
-    test_patch = _fix_new_file_patch_headers(test_patch)
+def _sanitize_eval_script(content: str) -> str:
+    """Remove unsafe git reset/checkout/clean lines that can undo env hotfixes."""
+    out_lines: list[str] = []
+    in_heredoc: str | None = None
 
-    lines = original_content.splitlines()
-    output_lines = []
-    in_heredoc = False
-    heredoc_delimiter = "EOF_114329324912"
+    for line in content.splitlines():
+        stripped = line.strip()
+        if in_heredoc:
+            out_lines.append(line)
+            if stripped == in_heredoc:
+                in_heredoc = None
+            continue
 
-    for line in lines:
-        if f" - <<'{heredoc_delimiter}'" in line or f" - <<\"{heredoc_delimiter}\"" in line:
-            # Ensure --no-index is present so new-file patches apply cleanly
-            if "git apply" in line and "--no-index" not in line:
-                line = line.replace("git apply", "git apply --no-index", 1)
-            output_lines.append(line)
-            in_heredoc = True
-            output_lines.extend(test_patch.splitlines())
-        elif in_heredoc and line.strip() == heredoc_delimiter:
-            output_lines.append(line)
-            in_heredoc = False
-        elif not in_heredoc:
-            output_lines.append(line)
+        heredoc_start = re.search(r"cat\s+<<['\"]?([A-Za-z0-9_]+)['\"]?", line)
+        if heredoc_start:
+            in_heredoc = heredoc_start.group(1)
+            out_lines.append(line)
+            continue
 
-    return '\n'.join(output_lines)
+        lower = stripped.lower()
+        if not stripped.startswith("#"):
+            if "git reset --hard" in lower:
+                out_lines.append(f"# [sanitized] removed unsafe command: {stripped}")
+                continue
+            if "git clean -fdx" in lower:
+                out_lines.append(f"# [sanitized] removed unsafe command: {stripped}")
+                continue
+            if "git checkout" in lower:
+                # Keep data-only checkout patterns used for external test fixtures.
+                if "test-data/" in lower or "tests/data/" in lower or "test_resource" in lower:
+                    out_lines.append(line)
+                else:
+                    out_lines.append(f"# [sanitized] removed unsafe command: {stripped}")
+                continue
+
+        out_lines.append(line)
+
+    return "\n".join(out_lines) + ("\n" if content.endswith("\n") else "")
 
 
-def extract_eval_script_from_response(res_text: str, output_dir: str, test_patch: str) -> bool:
+def _ensure_pytest_addopts_override(content: str) -> str:
+    """Ensure pytest commands neutralize repo-level addopts from pyproject/pytest.ini."""
+    out_lines: list[str] = []
+    in_heredoc: str | None = None
+    pytest_cmd = re.compile(r"(^|\s)(?:\.venv/bin/pytest|pytest)\b")
+    for line in content.splitlines():
+        stripped = line.strip()
+        # Track heredoc state — never modify lines inside heredocs.
+        if in_heredoc:
+            out_lines.append(line)
+            if stripped == in_heredoc:
+                in_heredoc = None
+            continue
+        heredoc_start = re.search(r"cat\s+<<['\"]?([A-Za-z0-9_]+)['\"]?", line)
+        if heredoc_start:
+            in_heredoc = heredoc_start.group(1)
+            out_lines.append(line)
+            continue
+        if stripped.startswith("#"):
+            out_lines.append(line)
+            continue
+        if pytest_cmd.search(line) and "pip install" not in line and "--override-ini=" not in line:
+            out_lines.append(f'{line} --override-ini="addopts="')
+        else:
+            out_lines.append(line)
+    return "\n".join(out_lines) + ("\n" if content.endswith("\n") else "")
+
+
+def _resolve_target_test_files(
+    test_patch: str,
+    test_files_content: dict[str, str] | None,
+) -> list[str]:
+    if test_files_content:
+        files = [p for p in test_files_content.keys() if p]
+        return list(dict.fromkeys(files))
+    return _extract_target_files_from_patch(test_patch)
+
+
+def _ensure_pytest_targets_generated_files(content: str, target_files: list[str]) -> str:
+    """Rewrite broad pytest invocations so they run generated test files only."""
+    if not target_files:
+        return content
+
+    target_args = " ".join(f'"{p}"' for p in target_files)
+    out_lines: list[str] = []
+    in_heredoc: str | None = None
+    pytest_cmd = re.compile(r"(?:^|\s)(?:\.venv/bin/pytest|pytest)\b")
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        # Track heredoc state — never modify lines inside heredocs.
+        if in_heredoc:
+            out_lines.append(line)
+            if stripped == in_heredoc:
+                in_heredoc = None
+            continue
+        heredoc_start = re.search(r"cat\s+<<['\"]?([A-Za-z0-9_]+)['\"]?", line)
+        if heredoc_start:
+            in_heredoc = heredoc_start.group(1)
+            out_lines.append(line)
+            continue
+        if stripped.startswith("#") or "pip install" in stripped:
+            out_lines.append(line)
+            continue
+        if not pytest_cmd.search(line):
+            out_lines.append(line)
+            continue
+
+        # If the command already targets generated files, keep it.
+        if any(f'"{p}"' in line or f"'{p}'" in line or f" {p}" in line for p in target_files):
+            out_lines.append(line)
+            continue
+
+        match = re.search(r"(?P<prefix>.*?(?:\.venv/bin/pytest|pytest)\b)(?P<rest>.*)", line)
+        if not match:
+            out_lines.append(line)
+            continue
+        prefix = match.group("prefix")
+        rest = match.group("rest")
+
+        # Replace common broad selectors (`tests`, `tests/`) if present; otherwise prepend targets.
+        replaced = re.sub(r'(?<!\S)["\']?tests/?["\']?(?=\s|$)', target_args, rest, count=1)
+        if replaced == rest:
+            replaced = f" {target_args}{rest}"
+
+        out_lines.append(prefix + replaced)
+
+    return "\n".join(out_lines) + ("\n" if content.endswith("\n") else "")
+
+
+def extract_eval_script_from_response(
+    res_text: str,
+    output_dir: str,
+    test_patch: str,
+    test_files_content: dict[str, str] | None = None,
+    repo_root: str | None = None,
+) -> bool:
     script_path = pjoin(output_dir, "eval.sh")
     script_skeleton_path = pjoin(output_dir, "eval_skeleton.sh")
     script_extracted = False
 
+    target_test_files = _resolve_target_test_files(test_patch, test_files_content)
+
     def _write(content: str) -> None:
-        fixed = replace_heredoc_content(content, test_patch)
+        content = _sanitize_eval_script(content)
+        fixed = replace_heredoc_content(
+            content,
+            test_patch,
+            test_files_content=test_files_content,
+            repo_root=repo_root,
+            scratch_dir=output_dir,
+        )
+        fixed = _sanitize_eval_script(fixed)
+        fixed = _ensure_pytest_targets_generated_files(fixed, target_test_files)
+        fixed = _ensure_pytest_addopts_override(fixed)
+        content = _ensure_pytest_targets_generated_files(content, target_test_files)
+        content = _ensure_pytest_addopts_override(content)
         with open(script_skeleton_path, "w") as f:
             f.write(content)
         with open(script_path, "w") as f:
