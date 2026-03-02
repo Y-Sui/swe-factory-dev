@@ -13,7 +13,7 @@ source "$(dirname "$0")/../.env"
 set +a
 
 SCRIPT_DIR="data_collection/collect"
-DATA_DIR="../internal-swe-bench-data"
+DATA_DIR="/data/yuansui/internal-swe-bench-data"
 mkdir -p "$DATA_DIR"
 
 # Step 1: Collect PRs
@@ -30,7 +30,7 @@ mkdir -p "$DATA_DIR/MiroMindAI__sd-torchtune"
 python3 "$SCRIPT_DIR/print_pulls.py" MiroMindAI/sd-torchtune "$DATA_DIR/MiroMindAI__sd-torchtune/prs.jsonl" --mode omnigirl
 
 # Step 2: Build task instances
-# Outputs per repo: instances_all_{N}.jsonl and instances_ori_test_{N}.jsonl
+# Outputs per repo: instances_selected_{N}.jsonl and instances_ori_test_{N}.jsonl
 # Filters: skips README-only PRs and trivial changes (<=2 lines)
 echo "=== Building instances for MiroMindAI/MiroThinker ==="
 python3 "$SCRIPT_DIR/build_dataset.py" \

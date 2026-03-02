@@ -159,7 +159,7 @@ setup(**setup_args)
 EOF
     
     # Install with custom setup script
-    python setup_direct.py develop
+    python3 setup_direct.py develop
   else
     echo "[INFO] Installing Bokeh with standard setup ..."
     # Use regular pip install

@@ -4,7 +4,7 @@ set -e  # Exit on any error
 
 check_pillow() {
     echo "Verifying Pillow installation..."
-    if python -c "import PIL; from PIL import Image; Image.new('RGB', (1, 1))" &> /dev/null; then
+    if python3 -c "import PIL; from PIL import Image; Image.new('RGB', (1, 1))" &> /dev/null; then
         echo "✅ Pillow installation successful!"
         return 0
     else

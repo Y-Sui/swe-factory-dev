@@ -2,7 +2,7 @@ set -e
 
 check_install() {
     echo "Verifying installation..."
-    if python -c "import coverage; print('CoveragePy version:', coverage.__version__)"; then
+    if python3 -c "import coverage; print('CoveragePy version:', coverage.__version__)"; then
         echo "✅ Installation successful!"
         return 0
     else
@@ -18,7 +18,7 @@ test_39_install () {
     uv pip install -r requirements/dev.pip
     uv pip install setuptools pytest 
     uv pip install -e .
-    uv run python igor.py zip_mods
+    uv run python3 igor.py zip_mods
 
     check_install
 }
@@ -31,7 +31,7 @@ test_37_install () {
     uv pip install -r requirements/dev.pip
     uv pip install setuptools pytest 
     uv pip install -e .
-    uv run python igor.py zip_mods
+    uv run python3 igor.py zip_mods
 
     check_install
 }

@@ -147,7 +147,7 @@ setup(**setup_args)
 EOF
     
     # Then install the Python package with our modified setup script
-    python setup_direct.py develop
+    python3 setup_direct.py develop
     
     # Success message
     echo "Successfully installed Bokeh using custom direct setup"
@@ -157,7 +157,7 @@ EOF
   fi
   
   # Verify installation
-  python -c "import bokeh, platform; print(f'Successfully installed Bokeh {bokeh.__version__} with Python {platform.python_version()}')"
+  python3 -c "import bokeh, platform; print(f'Successfully installed Bokeh {bokeh.__version__} with Python {platform.python_version()}')"
   
   # Create a shell script in the version directory that activates the environment
   cat > "$install_dir/activate_bokeh.sh" << EOL

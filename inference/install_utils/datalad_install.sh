@@ -3,7 +3,7 @@ set -e
 
 check_install() {
     echo "Verifying installation..."
-    if python -c "import datalad; print('Datalad version:', datalad.__version__)"; then
+    if python3 -c "import datalad; print('Datalad version:', datalad.__version__)"; then
         echo "✅ Installation successful!"
         return 0
     else

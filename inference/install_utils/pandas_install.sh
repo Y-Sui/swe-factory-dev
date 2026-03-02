@@ -51,11 +51,11 @@ build_and_check_pandas() {
   rm -f pyproject.toml
 
   echo "[INFO] Cleaning pandas build ..."
-  uv run python setup.py clean --all
+  uv run python3 setup.py clean --all
 
   echo "[INFO] Building pandas with CFLAGS='-O0 -Wno-error=array-bounds' ..."
   # Using uv run for the build:
-  CFLAGS="-O0 -Wno-error=array-bounds" uv run python setup.py build_ext --inplace -j 4
+  CFLAGS="-O0 -Wno-error=array-bounds" uv run python3 setup.py build_ext --inplace -j 4
 
   echo "[INFO] Installing pandas in editable mode ..."
   uv run pip install -e .

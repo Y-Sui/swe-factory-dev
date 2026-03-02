@@ -26,7 +26,7 @@ if ! docker image inspect swe-factory/sd-torchtune:base &>/dev/null; then
 fi
 
 SCRIPT_DIR="data_collection/collect"
-DATA_DIR="../internal-swe-bench-data"
+DATA_DIR="/data/yuansui/internal-swe-bench-data"
 SETUP_DIR="testbed"
 MODEL="openai/gpt-4.1"
 MODEL_SLUG="gpt-4.1"
@@ -42,9 +42,9 @@ REPOS=(
 
 # Step 1: Add version info to instances (modifies file in-place)
 for REPO in "${REPOS[@]}"; do
-  INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
+  INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
   if [ -z "$INSTANCE_FILE" ]; then
-    echo "=== No instances_all file found for $REPO, skipping ==="
+    echo "=== No instances_selected file found for $REPO, skipping ==="
     continue
   fi
 
@@ -80,7 +80,7 @@ done
 
 # Step 2: Prepare task lists, then run all repos in parallel.
 for REPO in "${REPOS[@]}"; do
-  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
+  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
   if [ -z "$TASKS_MAP" ]; then continue; fi
   OUT_DIR="$DATA_DIR/$REPO/setup_output_small_${MODEL_SLUG}"
   TASK_LIST="$OUT_DIR/task_list_small.txt"
@@ -110,7 +110,7 @@ done
 
 PIDS=()
 for REPO in "${REPOS[@]}"; do
-  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
+  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
   if [ -z "$TASKS_MAP" ]; then continue; fi
   OUT_DIR="$DATA_DIR/$REPO/setup_output_small_${MODEL_SLUG}"
   RESULT_DIR="$OUT_DIR/results"

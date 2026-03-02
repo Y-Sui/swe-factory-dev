@@ -6,14 +6,14 @@
 #
 # Usage:
 #   cd swe-factory && bash run/test_f2p.sh
-#   cd swe-factory && bash run/test_f2p.sh ../internal-swe-bench-data/MiroMindAI__MiroThinker/setup_output_small
+#   cd swe-factory && bash run/test_f2p.sh /data/yuansui/internal-swe-bench-data/MiroMindAI__MiroThinker/setup_output_small
 
 set -euo pipefail
 
 set -a && source .env && set +a
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
-DATA_DIR="../internal-swe-bench-data"
+DATA_DIR="/data/yuansui/internal-swe-bench-data"
 TIMEOUT=1800
 NUM_WORKERS=3
 

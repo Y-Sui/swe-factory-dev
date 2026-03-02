@@ -136,7 +136,7 @@ setup(**setup_args)
 EOF
 
         # Install the package with our custom setup script
-        (cd $repo_dir && python setup_direct.py develop)
+        (cd $repo_dir && python3 setup_direct.py develop)
         
         # Success message
         echo "Successfully installed Bokeh using custom direct setup"
@@ -146,7 +146,7 @@ EOF
     fi
 
     # Verify installation
-    python -c "import bokeh; print(f'Successfully installed Bokeh {bokeh.__version__}')"
+    python3 -c "import bokeh; print(f'Successfully installed Bokeh {bokeh.__version__}')"
 
     echo "✅ Bokeh $version installed successfully!"
 }

@@ -29,7 +29,7 @@ mkdir -p "$TESTBED" "$OUTDIR"
 
 # 1. Extract by-github versions
 echo "👉 1. Getting by-github versions..."
-python get_versions.py \
+python3 get_versions.py \
     --instances_path "$INSTANCE" \
     --num_workers 100 \
     --retrieval_method github \
@@ -37,7 +37,7 @@ python get_versions.py \
 
 # 2. Extract by-git versions
 echo "👉 2. Getting by-git versions..."
-python get_versions_by_git.py \
+python3 get_versions_by_git.py \
     --instance_path "$INSTANCE" \
     --testbed "$TESTBED" \
     --max_workers 100 \
@@ -46,6 +46,6 @@ python get_versions_by_git.py \
 
 # 3. Merge into the final version
 echo "👉 3. Merging both results into the final version..."
-python merge_final_data.py "$OUTDIR"
+python3 merge_final_data.py "$OUTDIR"
 
 echo "✅ All done. Results are saved in $OUTDIR"

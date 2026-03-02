@@ -30,7 +30,7 @@ if ! docker image inspect swe-factory/sd-torchtune:base &>/dev/null; then
 fi
 
 SCRIPT_DIR="data_collection/collect"
-DATA_DIR="../internal-swe-bench-data"
+DATA_DIR="/data/yuansui/internal-swe-bench-data"
 SETUP_DIR="testbed"
 # MODEL="anthropic/claude-sonnet-4.5"
 MODEL="google/gemini-2.5-flash"
