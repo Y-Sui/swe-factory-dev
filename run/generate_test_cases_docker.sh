@@ -37,6 +37,8 @@ MODEL="anthropic/claude-opus-4.6"
 ROUND=6
 NUM_PROCS=30
 
+DATE_TAG=$(date +%Y-%m-%d)
+
 REPOS=(
   "MiroMindAI__MiroThinker"
   "MiroMindAI__miroflow"
@@ -90,8 +92,8 @@ for REPO in "${REPOS[@]}"; do
     echo "=== No instances_selected file found for $REPO, skipping ==="
     continue
   fi
-  OUT_DIR="$DATA_DIR/$REPO/setup_output"
-  RESULT_DIR="$DATA_DIR/$REPO/setup_output/results"
+  OUT_DIR="$DATA_DIR/$REPO/setup_output_${DATE_TAG}"
+  RESULT_DIR="$DATA_DIR/$REPO/setup_output_${DATE_TAG}/results"
   mkdir -p "$OUT_DIR" "$RESULT_DIR"
 
   echo "=== Running Stage II for $REPO with $MODEL ==="
