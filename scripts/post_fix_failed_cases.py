@@ -252,18 +252,18 @@ POST_FIX_USER_PROMPT = """## Instance Info
 
 ---
 
-**Instructions**: Based on the failure diagnosis above, generate CORRECTED test files.
-- Fix the specific issues identified in the analysis
-- Read the test output carefully — the error messages tell you exactly what's wrong
-- Keep working test logic; only fix what's broken
+**Your task**: Before writing any code, carefully review ALL the context above and diagnose the failure yourself.
+
+Work through these steps explicitly:
+1. **F2P classification**: What does `{f2p_classification}` mean about how the tests are failing?
+2. **Test output**: Read the pre-patch and post-patch output line by line. What is the exact error (ImportError, AssertionError, AttributeError, SyntaxError, etc.)? Quote the specific line.
+3. **Root cause**: Why is this error happening? Cross-check against the Dockerfile (installed packages, working dir), the eval.sh (how tests are run, import paths), and the gold patch (what code actually changed).
+4. **Previous test file**: What specifically is wrong with it? Is it testing the wrong thing, using wrong imports, over-mocking, or asserting the wrong values?
+5. **Fix**: What is the minimal, targeted change that fixes the identified root cause?
+
+Then generate CORRECTED test files:
 - Produce 3-4 F2P tests and 3-4 P2P tests
 - Use `<test_file path="...">` tags for each file
-
-Think step by step:
-1. What is the F2P classification and what does it mean?
-2. What specific errors appear in the test output?
-3. What does the analysis agent say is wrong?
-4. What minimal changes fix these issues?
 """
 
 EVAL_SCRIPT_REGEN_PROMPT = """Generate an eval.sh script for the following test files in a SWE-bench evaluation environment.
@@ -286,6 +286,32 @@ Generate the eval.sh script wrapped in `<script>` tags. The script MUST:
 3. Write each test file using `cat <<'EOF_TEST_N' > "path"` heredocs
 4. Run pytest with `--override-ini="addopts="`
 5. Capture exit code and echo `OMNIGRIL_EXIT_CODE=$rc`
+"""
+
+DOCKERFILE_FIX_SYSTEM_PROMPT = """You are a Dockerfile repair agent. A Dockerfile failed to build during SWE-bench evaluation. Analyze the build error and produce a corrected Dockerfile.
+
+{repo_env_guidance}
+
+## Rules
+- Fix ONLY what caused the build error — do not restructure the entire Dockerfile
+- Do not remove git checkout or dependency installation steps
+- Do not add unnecessary layers
+- Output the complete fixed Dockerfile wrapped in `<dockerfile>` tags
+"""
+
+DOCKERFILE_FIX_USER_PROMPT = """## Instance: `{instance_id}`
+
+## Current Dockerfile (FAILED to build)
+```dockerfile
+{dockerfile}
+```
+
+## Docker Build Log
+```
+{build_log}
+```
+
+Analyze the build error above and output a corrected Dockerfile wrapped in `<dockerfile>` tags.
 """
 
 
@@ -556,6 +582,70 @@ def _get_clean_command(repo: str) -> str:
     return "git clean -fdx"
 
 
+def _try_fix_dockerfile(
+    output_dir: str,
+    ctx: dict[str, Any],
+    model,
+    repo_env_guidance: str,
+) -> tuple[str, dict[str, Any]] | None:
+    """If Docker build failed, ask LLM to fix the Dockerfile and re-run validation.
+
+    Returns (new_dockerfile_content, f2p_result) if a fix was attempted,
+    or None if the build log is missing or the LLM couldn't produce a Dockerfile.
+    The same eval.sh from output_dir is reused — no regeneration.
+    """
+    import re
+
+    build_log_path = pjoin(output_dir, "build_image.log")
+    if not os.path.exists(build_log_path):
+        return None
+
+    build_log = read_file_safe(build_log_path, max_chars=8000)
+    instance_id = ctx["instance_id"]
+
+    print_step(instance_id, 3, "Docker build failed — calling LLM to fix Dockerfile...")
+
+    system_prompt = DOCKERFILE_FIX_SYSTEM_PROMPT.format(repo_env_guidance=repo_env_guidance)
+    user_prompt = DOCKERFILE_FIX_USER_PROMPT.format(
+        instance_id=instance_id,
+        dockerfile=ctx["dockerfile"],
+        build_log=build_log,
+    )
+    response = call_model(model, [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ])
+
+    with open(pjoin(output_dir, "dockerfile_fix_response.txt"), "w") as f:
+        f.write(response)
+
+    # Extract fixed Dockerfile: try <dockerfile> tags first, then ```dockerfile block
+    match = re.search(r"<dockerfile>([\s\S]*?)</dockerfile>", response)
+    if not match:
+        match = re.search(r"```dockerfile\s*([\s\S]*?)```", response)
+    if not match:
+        print_warn("Could not extract fixed Dockerfile from LLM response")
+        return None
+
+    new_dockerfile = match.group(1).strip()
+    with open(pjoin(output_dir, "Dockerfile.fixed"), "w") as f:
+        f.write(new_dockerfile)
+    print_success("Fixed Dockerfile generated — re-running Docker validation with existing eval.sh...")
+
+    # Re-run Docker with fixed Dockerfile and the SAME eval.sh (no regeneration)
+    eval_script_path = pjoin(output_dir, "eval.sh")
+    f2p_result = run_f2p_validation(
+        output_dir=output_dir,
+        instance_id=instance_id,
+        base_commit=ctx["base_commit"],
+        gold_patch=ctx["patch"],
+        repo=ctx["repo"],
+        dockerfile_content=new_dockerfile,
+        eval_script_path=eval_script_path,
+    )
+    return new_dockerfile, f2p_result
+
+
 # ---------------------------------------------------------------------------
 # Data loading helpers
 # ---------------------------------------------------------------------------
@@ -666,9 +756,9 @@ def collect_instance_context(inst_dir: str, instance_data: dict) -> dict[str, An
         if os.path.exists(analysis_path):
             with open(analysis_path) as f:
                 analysis = json.load(f)
-            ctx["analysis_feedback"] = analysis.get(
-                "guidance_for_write_test_agent", "(no guidance)"
-            )
+            guidance = analysis.get("guidance_for_write_test_agent", "")
+            if guidance:
+                ctx["analysis_feedback"] = guidance
 
     return ctx
 
@@ -1115,6 +1205,26 @@ def post_fix_instance(
             # --- Check if we should stop ---
             classification = rr.get("new_classification")
 
+            # Docker build failed — try to fix the Dockerfile and re-run with same eval.sh
+            if classification == "ERROR" and "Docker build" in rr.get("docker_error", "") and not skip_docker:
+                fix = _try_fix_dockerfile(rr["output_dir"], ctx, model, repo_env_guidance)
+                if fix:
+                    new_dockerfile, fix_result = fix
+                    ctx["dockerfile"] = new_dockerfile
+                    classification = fix_result["classification"]
+                    result["new_classification"] = classification
+                    result["pre_exit_code"] = fix_result["pre_exit_code"]
+                    result["post_exit_code"] = fix_result["post_exit_code"]
+                    print_f2p_result(instance_id, classification, fix_result["pre_exit_code"], fix_result["post_exit_code"])
+                    # Update test outputs in ctx so next round has accurate feedback
+                    out_dir = rr["output_dir"]
+                    pre_path = pjoin(out_dir, "test_output_prev_apply.txt")
+                    post_path = pjoin(out_dir, "test_output.txt")
+                    if os.path.exists(pre_path):
+                        ctx["test_output_pre"] = read_file_safe(pre_path, max_chars=15000)
+                    if os.path.exists(post_path):
+                        ctx["test_output_post"] = read_file_safe(post_path, max_chars=15000)
+
             # Extraction failed — no point retrying with the same context
             if not rr["success"]:
                 print_fail(f"Round {round_num} failed to generate files, stopping")
@@ -1153,25 +1263,26 @@ def post_fix_instance(
                     parts.append(f'<test_file path="{path}">\n{content}\n</test_file>')
                 ctx["previous_test_files"] = "\n\n".join(parts)
 
-            # Update test outputs from this round's Docker run
+            # Update test outputs and eval.sh from this round's Docker run
             out_dir = rr["output_dir"]
             pre_path = pjoin(out_dir, "test_output_prev_apply.txt")
             post_path = pjoin(out_dir, "test_output.txt")
+            eval_path = pjoin(out_dir, "eval.sh")
             if os.path.exists(pre_path):
                 ctx["test_output_pre"] = read_file_safe(pre_path, max_chars=15000)
             if os.path.exists(post_path):
                 ctx["test_output_post"] = read_file_safe(post_path, max_chars=15000)
+            if os.path.exists(eval_path):
+                ctx["eval_script"] = read_file_safe(eval_path)
 
-            # Update classification and build a self-diagnosis for the next round
+            # Update classification for the next round
             ctx["f2p_classification"] = classification or "unknown"
             pre_exit = rr.get("pre_exit_code")
             post_exit = rr.get("post_exit_code")
             ctx["analysis_feedback"] = (
-                f"Post-fix round {round_num} result: {classification} "
+                f"Round {round_num} result: {classification} "
                 f"(pre-patch exit={pre_exit}, post-patch exit={post_exit}). "
-                f"The previous repair attempt did NOT achieve FAIL2PASS. "
-                f"Review the test output above carefully and try a different approach. "
-                f"Do not repeat the same mistakes."
+                f"Analyze the test output above yourself to identify what went wrong and fix it."
             )
 
     except Exception as e:
