@@ -178,7 +178,7 @@ def run_f2p_for_task(task_dir: str, client: docker.DockerClient, timeout: int) -
             # === Reset for Phase 2 ===
             if commit:
                 container.exec_run(f"git reset --hard {commit}", workdir="/testbed", user="root")
-                container.exec_run("git clean -fdx", workdir="/testbed", user="root")
+                container.exec_run("git clean -fd", workdir="/testbed", user="root")
 
             # === Phase 2: Post-patch (with gold patch) ===
             print(f"  [{task_id}] Phase 2: Running tests WITH gold patch...")
