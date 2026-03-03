@@ -43,6 +43,7 @@ class AgentsManager:
         self.start_time = start_time
         self.workflow_finish_status = False
         self.env_recovery_rounds = max(env_recovery_rounds, 0)
+        self._pre_build_count = 0  # counter exclusively for _try_build_dockerfile builds
 
         # Auto-populate base_image from repo name mapping if not already set
         if not getattr(task, "base_image", None):
@@ -250,11 +251,11 @@ class AgentsManager:
         if dockerfile == analysis_agent._cached_dockerfile and analysis_agent._cached_image_name:
             return None
 
-        analysis_agent.setup_dockerfile_num += 1
-        build_dir = os.path.join(self.output_dir, f"dockerfile_build_{analysis_agent.setup_dockerfile_num}")
+        self._pre_build_count += 1
+        build_dir = os.path.join(self.output_dir, f"dockerfile_build_{self._pre_build_count}")
         os.makedirs(build_dir, exist_ok=True)
         build_logger = setup_logger(self.task.task_id.lower(), Path(f"{build_dir}/build.log"))
-        image_name = f"{self.task.task_id.lower()}-dockerfile{analysis_agent.setup_dockerfile_num}:latest"
+        image_name = f"{self.task.task_id.lower()}-prebuild{self._pre_build_count}:latest"
 
         try:
             analysis_agent.build_docker_image(
@@ -327,9 +328,9 @@ class AgentsManager:
 
                     self.set_agent_status("write_test_agent", True)
                     eval_agent: WriteEvalScriptAgent = self.agents_dict["write_eval_script_agent"]  # type: ignore[assignment]
-                    existing_patch = (eval_agent.test_patch or "").strip()
-                    if existing_patch:
-                        eval_agent.test_patch = existing_patch + "\n" + gen_patch
+                    original_patch = (self.task.test_patch or "").strip()
+                    if original_patch:
+                        eval_agent.test_patch = original_patch + "\n" + gen_patch
                     else:
                         eval_agent.test_patch = gen_patch
                     eval_agent.generated_test_files = gen_files

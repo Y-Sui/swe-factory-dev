@@ -186,7 +186,11 @@ class TestAnalysisAgent(Agent):
                         "- ERROR: Could not determine exit codes.\n")
             else:
                 logger.error(tool_output)
-                return None, f'{self.agent_id} fails, Docker error', False
+                self.add_user_message(
+                    f'Docker image built successfully but test execution failed:\n{tool_output}\n\n'
+                    'Please diagnose the problem and provide guidance to fix the eval script, '
+                    'test files, or Dockerfile so tests can run.'
+                )
 
         # --- LLM analysis ---
         print_acr(f'Task {self.task.task_id} Iteration ROUND {self.iteration_num} Analyzing',
@@ -437,9 +441,9 @@ class TestAnalysisAgent(Agent):
             summary += "Container started.\n"
 
             # === Phase 1: Pre-patch run (without gold patch) ===
+            eval_file = Path(f"{self.get_latest_test_analysis_output_dir()}/eval.sh")
             try:
                 run_test_logger.info("=== F2P Phase 1: Running tests WITHOUT gold patch ===")
-                eval_file = Path(f"{self.get_latest_test_analysis_output_dir()}/eval.sh")
                 eval_file.write_text(eval_script)
                 copy_to_container(container, eval_file, Path("/eval.sh"))
 
