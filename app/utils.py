@@ -89,7 +89,7 @@ def clone_repo(clone_link: str, cloned_dir: str):
     Returns:
         - path to the newly cloned directory.
     """
-    dest_dir = os.path.dirname(cloned_dir)  # 获取目录路径
+    dest_dir = os.path.dirname(cloned_dir)  # Get the parent directory path
     cloned_name = os.path.basename(cloned_dir)
     clone_cmd = ["git", "clone", clone_link, cloned_name]
     create_dir_if_not_exists(dest_dir)

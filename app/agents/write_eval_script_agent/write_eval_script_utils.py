@@ -474,3 +474,38 @@ def extract_eval_script_from_response(
                     f.write(content)
 
     return script_extracted
+
+
+def write_eval_script_from_content(
+    content: str,
+    output_dir: str,
+    test_patch: str,
+    test_files_content: dict[str, str] | None = None,
+    repo_root: str | None = None,
+) -> None:
+    """Write eval.sh and eval_skeleton.sh from pre-built content, applying full post-processing."""
+    target_test_files = _resolve_target_test_files(test_patch, test_files_content)
+
+    skeleton = _sanitize_eval_script(content)
+    skeleton = _ensure_pytest_targets_generated_files(skeleton, target_test_files)
+    skeleton = _ensure_pytest_addopts_override(skeleton)
+
+    fixed = replace_heredoc_content(
+        content, test_patch,
+        test_files_content=test_files_content,
+        repo_root=repo_root,
+        scratch_dir=output_dir,
+    )
+    fixed = _sanitize_eval_script(fixed)
+    fixed = _ensure_pytest_targets_generated_files(fixed, target_test_files)
+    fixed = _ensure_pytest_addopts_override(fixed)
+
+    def _finalize(s: str) -> str:
+        if "OMNIGRIL_EXIT_CODE" not in s:
+            s += '\nrc=$?\necho "OMNIGRIL_EXIT_CODE=$rc"\n'
+        return s
+
+    with open(pjoin(output_dir, "eval_skeleton.sh"), "w") as f:
+        f.write(_finalize(skeleton))
+    with open(pjoin(output_dir, "eval.sh"), "w") as f:
+        f.write(_finalize(fixed))

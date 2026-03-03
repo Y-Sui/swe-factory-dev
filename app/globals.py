@@ -44,8 +44,5 @@ agent_mode: str = "multi_agent"
 
 disable_run_test: bool = False
 
-# Number of quick F2P validation rounds after test generation (0 = disabled)
-quick_f2p_rounds: int = 2
-
 # Additional iterations granted only for infra/environment recovery signals.
 env_recovery_rounds: int = 2

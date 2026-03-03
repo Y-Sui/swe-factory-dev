@@ -1,8 +1,9 @@
 """Shared utilities for SWE-Factory pipeline.
 
 Canonical implementations of token injection, exit-code extraction,
-F2P classification, and Dockerfile essentials injection.  Every module
-in the project should import from here instead of maintaining its own copy.
+F2P classification, Dockerfile essentials injection, diff parsing,
+and repo eval config.  Every module in the project should import from
+here instead of maintaining its own copy.
 """
 
 from __future__ import annotations
@@ -61,6 +62,63 @@ def inject_github_token(url: str) -> str:
             "https://github.com", f"https://x-access-token:{token}@github.com"
         )
     return url
+
+
+# ---------------------------------------------------------------------------
+# Dockerfile essentials injection
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Diff parsing
+# ---------------------------------------------------------------------------
+
+DIFF_MODIFIED_FILE_REGEX = r"--- a/(.*)"
+DIFF_NEW_FILE_REGEX = r"\+\+\+ b/(.*)"
+DIFF_DEVNULL_REGEX = r"--- /dev/null\n\+\+\+ b/(.*)"
+
+
+def parse_test_files_from_patch(patch: str) -> list[str]:
+    """Return deduplicated list of test file paths referenced in a unified diff."""
+    modified = [p.split("\t")[0] for p in re.findall(DIFF_MODIFIED_FILE_REGEX, patch)
+                if not p.startswith("/dev/null")]
+    new_files = [p.split("\t")[0] for p in re.findall(DIFF_NEW_FILE_REGEX, patch)
+                 if not p.startswith("/dev/null")]
+    return list(dict.fromkeys(modified + new_files))
+
+
+# ---------------------------------------------------------------------------
+# Repo-specific eval config
+# ---------------------------------------------------------------------------
+
+REPO_EVAL_CONFIG: dict[str, dict] = {
+    "MiroMindAI/miroflow": {
+        "workdir": "/testbed",
+        "pytest_cmd": ".venv/bin/pytest {files} -xvs",
+    },
+    "MiroMindAI/MiroThinker": {
+        "workdir": "/testbed/apps/miroflow-agent",
+        "pytest_cmd": ".venv/bin/pytest {files} -xvs",
+    },
+    "MiroMindAI/sd-torchtune": {
+        "workdir": "/testbed",
+        "pytest_cmd": "pytest {files} -xvs --without-integration",
+    },
+}
+DEFAULT_REPO_EVAL_CONFIG = REPO_EVAL_CONFIG["MiroMindAI/miroflow"]
+
+
+# ---------------------------------------------------------------------------
+# Repo-specific git clean command
+# ---------------------------------------------------------------------------
+
+
+def get_clean_command_for_repo(repo_name: str) -> str:
+    """Return a repo-aware git clean command that preserves uv virtualenvs."""
+    if repo_name == "MiroMindAI/miroflow":
+        return "git clean -fdx -e .venv"
+    if repo_name == "MiroMindAI/MiroThinker":
+        return "git clean -fdx -e .venv -e apps/miroflow-agent/.venv"
+    return "git clean -fdx"
 
 
 # ---------------------------------------------------------------------------

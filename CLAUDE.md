@@ -14,12 +14,7 @@ We follow the data structures of [SWE-bench](https://github.com/SWE-bench/SWE-be
 |------|-----------|----------|-------------|----------------|-------|
 | `MiroMindAI/MiroThinker` | Public | Python (>=3.12) | uv + hatchling | Minimal (2 files) | Monorepo: `apps/`, `libs/`. Deep research agent. 6.4k stars. |
 | `MiroMindAI/miroflow` | Public | Python (>=3.12) | uv + hatchling | **None** | Agent framework. `src/` layout. 2.6k stars. |
-| `MiroMindAI/sd-torchtune` | **Private** | Python (>=3.9) | setuptools | Extensive (159 files) | Fork of pytorch/torchtune with MiroMind additions. Requires `GITHUB_TOKEN`. |
-
-Key repo-specific details:
-- **MiroThinker**: Uses `justfile` for tasks, deps include `anthropic`, `openai`, `mcp`, `fastmcp`, `e2b-code-interpreter`, `hydra-core`. CI: ruff lint only.
-- **miroflow**: Deps include `anthropic`, `openai`, `mcp`, `fastmcp`, `e2b-code-interpreter`, `hydra-core`, `rich`. CI: ruff lint + PR title check. Entry point: `main.py`.
-- **sd-torchtune**: Deps include `torch`, `torchdata`, `liger-kernel`, `datasets`, `huggingface_hub`, `sentencepiece`, `tiktoken`. CLI entry: `tune` command. Full CI: unit, e2e, GPU, daily, regression, RL tests, lint, docs, wheels, export. Install: `pip install -e ".[dev]"`.
+| `MiroMindAI/sd-torchtune` | **Private** | Python (>=3.9) | setuptools | Extensive (159 files) | Fork of pytorch/torchtune with MiroMind additions. Requires `GITHUB_TOKEN`. You can use .env token to access this folder.|
 
 ## SWE-bench Instance Data Format
 
@@ -31,7 +26,7 @@ Each instance in our benchmark must follow this schema (compatible with SWE-benc
   "repo": "MiroMindAI/miroflow",
   "base_commit": "<40-char SHA before the fix PR>",
   "patch": "<unified diff of the gold fix, excluding test changes>",
-  "test_patch": "<unified diff of test file changes — LLM-generated for our repos>",
+  "test_patch": "<unified diff of test file changes — we use LLM to generate these test files and convert them to the diff format>",
   "problem_statement": "<GitHub issue title + body>",
   "hints_text": "<issue comments before the fix PR>",
   "created_at": "<ISO timestamp>",
@@ -42,15 +37,13 @@ Each instance in our benchmark must follow this schema (compatible with SWE-benc
 }
 ```
 
-SWE-bench-Pro extends this with: `requirements`, `interface`, `repo_language`, `issue_specificity`, `issue_categories`, `before_repo_set_cmd`, `selected_test_files_to_run`, `dockerhub_tag`. Include these where applicable.
-
 ## The Core Challenge: LLM-Generated Test Cases
 
 Since MiroThinker and miroflow have almost no tests, and sd-torchtune's existing tests may not cover specific issue-related behavior, the `WriteTestAgent` must generate high-quality test cases. This is the hardest and most important part of the pipeline.
 
 ### What Makes a Good Generated Test
 
-A generated test must satisfy ALL of:
+The generated test files should satisfy the following requirements. The test files should have test cases for F2P and P2P. The failure should also be relevant to the bug described in the issue, not due to import errors, missing dependencies, syntax errors, or unrelated logic. The assertion error and failure message must be directly related to the issue description.
 
 1. **Fail-to-Pass (F2P)**: The test FAILS at `base_commit` (before the gold patch) and PASSES after applying the gold patch. This is the primary signal.
 2. **Pass-to-Pass (P2P)**: Regression tests that PASS both before and after the gold patch, verifying the fix doesn't break existing behavior.
@@ -63,15 +56,15 @@ A generated test must satisfy ALL of:
 | Result | Pre-Patch | Post-Patch | Meaning |
 |--------|-----------|------------|---------|
 | **FAIL2PASS** | FAIL | PASS | Desired. Test captures the bug and verifies the fix. |
-| **PASS2PASS** | PASS | PASS | Test is too weak — does not capture the bug. |
-| **FAIL2FAIL** | FAIL | FAIL | Environment/setup broken, or gold patch doesn't fix it. |
-| **PASS2FAIL** | PASS | FAIL | Test is inverted or broken — gold patch causes regression. |
+| **PASS2PASS** | PASS | PASS | Test is too weak — does not capture the bug. But it is fine for regression test. You can keep it.|
+| **FAIL2FAIL** | FAIL | FAIL | Environment/setup broken, or gold patch doesn't fix it. This is not what we want; fix them.|
+| **PASS2FAIL** | PASS | FAIL | Test is inverted or broken — gold patch causes regression. This is also not what we want; fix them.|
 
 ### Prompting Guidance for Test Generation Agents
 
 When generating tests, the LLM agent should be prompted to:
-- Read the issue description and gold patch carefully before writing any test
-- Write tests that exercise the **specific behavior** described in the issue, not the code structure
+- Read the issue description, gold patch, and the original code where the patch will be applied (like the functions, the imports, etc.) carefully before writing any test
+- Write tests that exercise the **specific behavior** described in the issue. If the issue is vague or not clear, consider the code structure.
 - Use assertions that produce meaningful failure messages tied to the bug
 - Avoid overfitting to the exact patch diff — test the observable behavior change
 - Include both F2P tests (targeting the bug) and P2P tests (regression guards)
@@ -86,142 +79,105 @@ The generated Dockerfile must build successfully. To verify:
 1. `docker build` completes without errors
 2. The container starts and the repo is cloned at `/testbed` at the correct `base_commit`
 3. All project dependencies are installed and importable
-4. The test runner (pytest, etc.) is available and functional
+4. The test runner (pytest, etc.) is available and functional (sometimes the pytest may be missing from the docker file)
 
-To improve Dockerfile generation quality, provide **repo-specific environment setup templates** as prompt context. These templates should be derived from each repo's actual build system:
+To improve Dockerfile generation quality, we provide **repo-specific environment setup templates** as prompt context. The template Dockerfiles can be found in `./docker`:
 
-- **MiroThinker/miroflow**: Python 3.12+, `uv` package manager, `hatchling` build backend
-- **sd-torchtune**: Python 3.9+, `setuptools`, `pip install -e ".[dev]"`, may need PyTorch/CUDA base image
+- `./docker/Dockerfile.miroflow`
+- `./docker/Dockerfile.mirothinker`
+- `./docker/Dockerfile.sd-torchtune`
+
+These Dockerfile templates serve as the base image. The generated Dockerfile should use `FROM` to extend this file, and add any extra dependencies required by the specific commit.
 
 ### Part 2: Test Case Validity
 
 Generated tests must pass the F2P/P2P classification AND quality checks:
 
-1. **F2P gate**: At least one test must be FAIL2PASS. If all tests are PASS2PASS, the test suite is too weak and must be regenerated.
-2. **Failure message relevance**: The assertion error when the test fails (pre-patch) must relate to the issue description. Check: does the error message mention the same concepts/values as the issue?
-3. **Minimal fix check**: Apply the gold patch — test passes. Apply random same-file edits instead — test should still fail. This can be automated by generating N random edits to the same files as the gold patch and verifying the test still fails.
-4. **Alternative fix sensitivity**: The test should verify correct behavior, not exact implementation. If the issue says "function returns wrong value", test the return value, don't assert on internal variable names.
+1. F2P gate: At least one test must be FAIL2PASS. If all tests are PASS2PASS, the test suite is too weak and must be regenerated.
+2. Failure message relevance: The assertion error when the test fails (pre-patch) should be related to the issue description. For issues regarding feature additions, we can make this looser — the test file should fail because the pre-patch does not support the feature.
+3. The test files should be generally broad to accept different implementations. We don't expect a test file that only accepts one simple solution matching the gold patch. It should also work for alternative fixes that are different from the gold patch.
 
-### Exit Code Capture
+For the 1, you should use the docker env to verify it. For the 2 and 3, you should call LLM to do LLM-judge.
 
-Test results are captured via the `OMNIGRIL_EXIT_CODE` marker in eval.sh output:
-```bash
-pytest tests/test_foo.py; rc=$?; echo "OMNIGRIL_EXIT_CODE=$rc"
-```
-The regex `r"OMNIGRIL_EXIT_CODE=(\d+)"` extracts the exit code. 0 = pass, non-zero = fail.
+## Implementation
 
-## What Is SWE-Factory
+We use `pip install -r requirements-inference.txt` to install the Python packages for the implementation.
 
-An automated pipeline for GitHub issue resolution data collection and evaluation benchmark construction. It collects raw issue data, uses an LLM-powered multi-agent system (SWE-Builder) to generate Docker-based evaluation environments (Dockerfile + eval.sh), validates them via Fail2Pass testing, and supports running coding agents against the generated environments.
+Key paths:
+- Bash scripts to run: `./run`
+- Utility scripts: `./scripts`
+- Agent workflow: `./app/agents`
+- Agent prompts: `./app/prompts/prompts.py`
+- LLM client: `app/model/gpt.py` (OpenAI API); register models at `app/model/register.py`
 
-## Environment Setup
-
-```bash
-conda create --name swe-factory python=3.12.5 -y
-conda activate swe-factory
-pip install -r requirements.txt
-```
-
-For inference only: `pip install -r requirements-inference.txt` (separate conda env with Python 3.13 recommended).
-
-Requires Docker (tested with v27.0.3-1) and Ubuntu 22.04.
-
-## Common Commands
-
-### Stage II: Generate evaluation environments (Dockerfile + eval.sh)
-
-```bash
-export OPENAI_API_BASE_URL=<your_base_url>
-export OPENAI_KEY=<your_key>
-
-python app/main.py swe-bench \
-    --model gpt-4.1-mini \
-    --tasks-map <instances.jsonl> \
-    --num-processes 10 \
-    --model-temperature 0.2 \
-    --conv-round-limit 10 \
-    --output-dir <output_dir> \
-    --setup-dir testbed \
-    --results-path <output_dir>/results
-```
-
-Run a single task: add `--task <instance_id>`.
-Run a batch from a file: add `--task-list-file <file_with_ids>`.
-
-### Full pipeline (batched)
-
-```bash
-bash run/run.sh
-```
-
-### Stage III: Fail2Pass validation
-
-```bash
-# Generate test logs (before/after gold patch)
-python evaluation/run_evaluation.py \
-  --dataset_name <results.json> \
-  --predictions_path gold \
-  --max_workers 5 \
-  --run_id <run_id> \
-  --output_path run_instances \
-  --timeout 3600 \
-  --is_judge_fail2pass
-
-# Judge results
-python scripts/judge_fail2pass.py <eval_dir> <output.json>
-```
-
-### Test F2P on existing artifacts (no LLM)
-
-```bash
-bash run/test_f2p.sh [optional_output_dir]
-```
-
-### Inference: run coding agents on generated environments
-
-```bash
-# Stage 1: build/normalize images
-python inference/build_image/main.py --input <instances.json> --output <run_dir> --model_name <model>
-
-# Stage 2: run agent
-python -m inference.agenthub.run.edit runagent_multiple \
-  --dataset <transferred.json> --scaffold mini_swe_agent --llm_name openai/gpt-4o-mini ...
-```
+For the LLM provider, we use OpenRouter. So for each model, we have to use the format `anthropic/claude-opus-4.6`; we cannot omit the `anthropic/` prefix.
 
 ## Architecture
 
-### Three-Stage Pipeline
+We use multi-agent collaboration to generate Dockerfiles, test files, and test scripts. The agents are orchestrated by `AgentsManager` (`agents_manager.py`), which runs an iterative loop up to `--conv-round-limit` rounds. Each agent has a `finish_status` flag; agents only run when their dependencies are met and they haven't finished yet.
 
-1. **Stage I (Data Collection)** - `data_collection/`: Collects raw issue data from GitHub using APIs. `collect/` gathers PRs, `versioning/` adds version metadata.
-2. **Stage II (Environment Setup)** - `app/`: SWE-Builder multi-agent system generates Dockerfiles and eval scripts. Entry point: `app/main.py`.
-3. **Stage III (Validation)** - `evaluation/` + `scripts/`: Runs Fail2Pass validation in Docker. `inference/`: Runs coding agents against built environments.
+Agents run in order each iteration:
 
-### SWE-Builder Agent System (`app/agents/`)
+| Step | Agent | Class | Runs when |
+|------|-------|-------|-----------|
+| 1 | **ContextRetrievalAgent** | `context_retrieval_agent/` | at beginning |
+| 2 | **WriteDockerfileAgent** | `write_dockerfile_agent/` | after collect env info from ContextRetrievalAgent |
+| 3 | **WriteTestAgent** | `write_test_agent/` | context + Dockerfile done; only if `test_patch` is empty or has < 3 files |
+| 4 | **eval script generation** | inline in `AgentsManager` | context + Dockerfile + test generation done; deterministic, no LLM, no agent object |
+| 5 | **TestAnalysisAgent** | `test_analysis_agent/` | all prior steps done; builds Docker, runs tests |
 
-Orchestrated by `AgentsManager` (`agents_manager.py`), which runs an iterative loop (up to `--conv-round-limit` rounds):
+After step 2, WriteDockerfileAgent creates the Dockerfile. `AgentsManager` immediately runs an inner self-reflection loop (at least 2 rounds): generate Dockerfile → attempt Docker build → if build fails, feed error back to WriteDockerfileAgent and retry. Only when the build succeeds does the pipeline advance to WriteTestAgent.
 
-1. **ContextRetrievalAgent** - Gathers repo setup info, READMEs, test commands
-2. **WriteTestAgent** - Generates pytest tests when `test_patch` is missing or has < 3 files. **Critical for our project** since target repos lack tests.
-3. **WriteDockerfileAgent** - Generates Dockerfile for the evaluation environment
-4. **WriteEvalScriptAgent** - Generates `eval.sh` to run tests inside the container
-5. **TestAnalysisAgent** - Validates environment by building Docker + running tests, classifies result as FAIL2PASS/PASS2PASS/FAIL2FAIL/PASS2FAIL, routes feedback to other agents
+After step 3, WriteTestAgent creates the test files. Step 4, `AgentsManager._generate_eval_script()` deterministically composes test files and repo config into an `eval.sh` — no LLM call. The utility functions in `write_eval_script_agent/write_eval_script_utils.py` handle post-processing (heredoc injection, sanitisation, addopts override). Step 5, TestAnalysisAgent builds the Docker image, runs the eval script pre-patch and post-patch, and produces a JSON analysis with per-agent guidance fields. `AgentsManager` routes feedback by resetting the relevant agent's `finish_status` (or `_eval_script_done` for the eval step) so it re-runs the next iteration. The feedback covers two parts: (1) Docker run results — whether the test files pass; (2) LLM-generated diagnosis — the quality of the test files.
 
-All agents extend `Agent` base class (`app/agents/agent.py`) which provides `MessageThread`, tool dispatch, and call tracking. The `AgentsManager` uses a **Memory Pool** (`results.json`) to reuse successful setups for the same repo.
+All agents extend the `Agent` base class (`app/agents/agent.py`), which provides `MessageThread`, tool dispatch, and call tracking. Should use the messageThread to manage context for each agent. We should ensure that each agent recieves clear information from other agents. Don't use vague language during the LLM information flow.
 
 ### Model Layer (`app/model/`)
 
 - `common.py`: `Model` ABC, model registry (`MODEL_HUB`), `LiteLLMGeneric` for arbitrary LiteLLM models
 - `register.py`: Registers all built-in models (GPT, Claude, Gemini, DeepSeek, Qwen, Ollama, Groq, Azure, Bedrock)
-- Use `--model <name>` for registered models or `--model litellm-generic-<provider/model>` for any LiteLLM-supported model
+- Use `--model <name>` for registered models or
 - API config via env vars: `OPENAI_API_BASE_URL`, `OPENAI_KEY`; for private repos: `GITHUB_TOKEN`
-
-### Inference Module (`inference/`)
-
-Built on R2E-Gym. Two stages: image building (`inference/build_image/`) and agent execution (`inference/agenthub/`). Supports scaffolds: `mini_swe_agent`, `live_swe_agent`, `r2egym` (DeepSWE), `openhands`.
 
 ### Key Data Flow
 
-Task instances (`.jsonl`) -> `app/main.py` clones repos into `testbed/` -> agents generate `Dockerfile` + `eval.sh` + `test_patch` -> outputs saved to `--output-dir/<instance_id>/` -> successful results appended to `--results-path/results.json` -> validation via `evaluation/run_evaluation.py`
+Task instances (`.jsonl`) -> `app/main.py` clones repos into `testbed/` -> agents generate `Dockerfile` + `eval.sh` + `test_patch` -> outputs saved to `--output-dir/<instance_id>/` -> successful results appended to `--results-path/results.json`
+
+### Post-Fix Pipeline (`scripts/post_fix_failed_cases.py`)
+
+A standalone repair loop that targets instances that failed to achieve FAIL2PASS. Entry point: `run/post_fix.sh`.
+This bash only runs after we already finished the above agent workflow and create all the files. But still the test files are failed. Then we could call this post-fix. But remember this post-pix is just an alternative way to do. Our goal is still replied on the multi-agent workflow to generate high quality test files and prepare the enviornments.
+
+**Input**: an `applicable_setup/` directory (from Stage II) + the original instances JSONL.
+**Output**: updated `eval.sh`, `status.json`, and JSON result files written back to `applicable_setup/<instance_id>/`.
+
+Each instance goes through up to `--max-rounds` repair rounds. Within each round there are **3 LLM roles**:
+
+| # | Role | Prompt | Trigger |
+|---|------|--------|---------|
+| 1 | **Test Repair Agent** | `POST_FIX_SYSTEM_PROMPT` + `POST_FIX_USER_PROMPT` | Every round — generates new test files |
+| 2 | **Eval Script Agent** | `EVAL_SCRIPT_REGEN_PROMPT` | Every round — generates `eval.sh` for the new tests |
+| 3 | **Dockerfile Fix Agent** | `DOCKERFILE_FIX_SYSTEM_PROMPT` + `DOCKERFILE_FIX_USER_PROMPT` | Only when Docker build fails — fixes `Dockerfile`, reuses existing `eval.sh` |
+
+**Round flow**:
+```
+Round N:
+  1. Test Repair Agent  → new test files (from previous failures + test output context)
+  2. Eval Script Agent  → new eval.sh
+  3. Docker F2P         → build image, run tests pre-patch and post-patch
+     ├─ FAIL2PASS → write back, done ✓
+     ├─ FAIL2FAIL / PASS2PASS → update context, continue to Round N+1
+     └─ ERROR (build failed) → Dockerfile Fix Agent → re-run Docker with same eval.sh
+           ├─ FAIL2PASS → write back, done ✓
+           └─ still failing → update context, continue to Round N+1
+```
+
+**Context carried across rounds** (updated each round):
+- `previous_test_files` — the failing test files from the previous round
+- `eval_script` — the eval.sh actually used in the previous Docker run
+- `test_output_pre` / `test_output_post` — Docker output before/after gold patch
+- `f2p_classification` — result of the previous round
+- `dockerfile` — updated if Dockerfile Fix Agent ran successfully
 
 ## Code Style
 
@@ -232,21 +188,23 @@ Task instances (`.jsonl`) -> `app/main.py` clones repos into `testbed/` -> agent
 - Prefer minimal, targeted code changes. Don't refactor unrelated code while fixing a bug.
 - No over-engineering. If a simple `if/else` works, don't build a strategy pattern.
 - Don't add speculative features, configurability, or extension points "for later". Solve the problem at hand.
-- When iterating on a failing pipeline (e.g. Dockerfile won't build, test is FAIL2FAIL), make one change at a time so you can isolate what fixed it.
+
+### LLM Prompts
+
+- Prefer to make the prompt concise, clear, and free of misleading information.
+- Give the LLM full context instead of truncated or summarized info; if there is raw information (like error output), put it directly in the agent context.
 
 ### Python
 
-- 4-space indentation, `snake_case` for functions/variables, `PascalCase` for classes. No enforced formatter; match nearby style.
 - All code comments must be in English.
 - Keep functions short and focused. If a function does "generate test + validate test + retry", split it.
-- Avoid deep nesting — early returns are preferred over nested `if/else` blocks.
 - Don't duplicate utility logic. Token injection, exit code extraction, F2P classification, and Dockerfile essentials injection each belong in ONE shared place, imported everywhere.
 - Error handling should be practical: catch specific exceptions, log useful context, and fail fast. Don't swallow errors silently — a hidden failure in test generation wastes an entire pipeline run.
+- Avoid creating non-informative print lines;
 
 ### Bash Scripts
 
 - Simple, concise, and easy to read. Prefer explicit, straightforward commands over loops and config arrays.
-- Always use `set -euo pipefail` at the top of scripts.
 - When running parallel background processes, collect and check exit codes — don't let failures go unnoticed.
 
 ### Dockerfiles
@@ -267,4 +225,3 @@ Task instances (`.jsonl`) -> `app/main.py` clones repos into `testbed/` -> agent
 - Local runs require env vars in `.env`: `OPENAI_KEY`, `OPENAI_API_BASE_URL`, optionally `GITHUB_TOKEN` (for private repos).
 - `GITHUB_TOKEN` with `repo` scope is **required** for `MiroMindAI/sd-torchtune` (private repo) — cloning, API calls, and Docker builds all need it.
 - `testbed/` is the default clone directory for target repos; keep it clean.
-- Task timeout per subprocess: 5400s (90 min). Test execution timeout: 300s.

@@ -111,7 +111,6 @@ def main(args, subparser_dest_attr_name: str = "command"):
     globals.organize_output_only = args.organize_output_only
     globals.results_path = args.results_path
     globals.disable_run_test = args.disable_run_test
-    globals.quick_f2p_rounds = args.quick_f2p_rounds
     globals.env_recovery_rounds = args.env_recovery_rounds
     
     subcommand = getattr(args, subparser_dest_attr_name)
@@ -344,12 +343,6 @@ def add_task_related_args(parser: ArgumentParser) -> None:
         action="store_true",
         default=False,
         help="Skip Docker test execution (generate Dockerfile+eval.sh only).",
-    )
-    parser.add_argument(
-        "--quick-f2p-rounds",
-        type=int,
-        default=2,
-        help="Number of quick F2P validation rounds after test generation (0 to disable).",
     )
     parser.add_argument(
         "--env-recovery-rounds",
@@ -748,7 +741,6 @@ def do_inference(
             globals.conv_round_limit,
             globals.results_path,
             disable_run_test=globals.disable_run_test,
-            quick_f2p_rounds=globals.quick_f2p_rounds,
             env_recovery_rounds=globals.env_recovery_rounds,
         )
         agents_manager.run_workflow()

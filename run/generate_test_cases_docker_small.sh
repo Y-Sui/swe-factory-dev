@@ -41,6 +41,8 @@ ROUND=3
 NUM_PROCS=5
 MAX_INSTANCES=1
 
+DATE_TAG=$(date +%Y-%m-%d)
+
 REPOS=(
   "MiroMindAI__MiroThinker"
   # "MiroMindAI__miroflow"
@@ -90,7 +92,7 @@ done
 for REPO in "${REPOS[@]}"; do
   TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
   if [ -z "$TASKS_MAP" ]; then continue; fi
-  OUT_DIR="$DATA_DIR/$REPO/setup_output_small"
+  OUT_DIR="$DATA_DIR/$REPO/setup_output_small${DATE_TAG}"
   TASK_LIST="$OUT_DIR/task_list_small.txt"
   mkdir -p "$OUT_DIR" "$OUT_DIR/results"
 
@@ -120,7 +122,7 @@ PIDS=()
 for REPO in "${REPOS[@]}"; do
   TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
   if [ -z "$TASKS_MAP" ]; then continue; fi
-  OUT_DIR="$DATA_DIR/$REPO/setup_output_small"
+  OUT_DIR="$DATA_DIR/$REPO/setup_output_small${DATE_TAG}"
   RESULT_DIR="$OUT_DIR/results"
   TASK_LIST="$OUT_DIR/task_list_small.txt"
 
@@ -144,4 +146,4 @@ for PID in "${PIDS[@]}"; do
 done
 [ "$FAIL" -eq 0 ] || exit 1
 
-echo "=== Done ==="
+echo "=== Done === (elapsed: ${ELAPSED}s / $(( ELAPSED / 60 ))m$(( ELAPSED % 60 ))s)"
