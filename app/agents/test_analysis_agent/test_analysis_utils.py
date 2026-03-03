@@ -9,7 +9,7 @@ from collections.abc import Callable
 from app.data_structures import MessageThread
 from app.model import common
 from app.post_process import ExtractStatus, is_valid_json
-import json
+from swe_factory_utils import extract_json_from_response
 
 SYSTEM_PROMPT = """You are an expert in analyzing and validating evaluation environment setups for software testing.
 
@@ -189,31 +189,3 @@ def is_valid_response(data: Any) -> tuple[bool, str]:
         return False, "At least one guidance field must be non-empty when is_finish is False"
 
     return True, "OK"
-
-
-
-def extract_json_from_response(res_text: str):
-    """
-    Extarct json result from the LLM response
-    """
-    json_extracted = None
-
-
-    json_matches = re.findall(r"```json([\s\S]*?)```", res_text, re.IGNORECASE)
-    if json_matches:
-        json_extracted = json_matches[0].strip()
-
-
-    if not json_extracted:
-        json_code_blocks = re.findall(r"```([\s\S]*?)```", res_text, re.IGNORECASE)
-        for content in json_code_blocks:
-            clean_content = content.strip()
-
-            try:
-                json.loads(clean_content)
-                json_extracted = clean_content
-                break
-            except json.JSONDecodeError:
-                continue
-
-    return json_extracted if json_extracted else res_text

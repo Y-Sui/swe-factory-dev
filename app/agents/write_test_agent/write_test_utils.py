@@ -88,7 +88,7 @@ def extract_test_files_from_response(res_text: str) -> dict[str, str]:
     Returns a dict mapping relative path -> file content.
     """
     files: dict[str, str] = {}
-    for m in re.finditer(r'<test_file\s+path="([^"]+)">([\s\S]*?)</test_file>', res_text):
+    for m in re.finditer(r'<test_file\s+path=["\']([^"\']+)["\']>([\s\S]*?)</test_file>', res_text):
         path = m.group(1).strip()
         content = m.group(2)
         # Strip a single leading newline if present (tag formatting artefact)

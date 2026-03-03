@@ -306,34 +306,6 @@ def _sanitize_eval_script(content: str) -> str:
     return "\n".join(out_lines) + ("\n" if content.endswith("\n") else "")
 
 
-def _ensure_pytest_addopts_override(content: str) -> str:
-    """Ensure pytest commands neutralize repo-level addopts from pyproject/pytest.ini."""
-    out_lines: list[str] = []
-    in_heredoc: str | None = None
-    pytest_cmd = re.compile(r"(^|\s)(?:\.venv/bin/pytest|pytest)\b")
-    for line in content.splitlines():
-        stripped = line.strip()
-        # Track heredoc state — never modify lines inside heredocs.
-        if in_heredoc:
-            out_lines.append(line)
-            if stripped == in_heredoc:
-                in_heredoc = None
-            continue
-        heredoc_start = re.search(r"cat\s+<<['\"]?([A-Za-z0-9_]+)['\"]?", line)
-        if heredoc_start:
-            in_heredoc = heredoc_start.group(1)
-            out_lines.append(line)
-            continue
-        if stripped.startswith("#"):
-            out_lines.append(line)
-            continue
-        if pytest_cmd.search(line) and "pip install" not in line and "--override-ini=" not in line:
-            out_lines.append(f'{line} --override-ini="addopts="')
-        else:
-            out_lines.append(line)
-    return "\n".join(out_lines) + ("\n" if content.endswith("\n") else "")
-
-
 def _resolve_target_test_files(
     test_patch: str,
     test_files_content: dict[str, str] | None,
@@ -420,9 +392,7 @@ def extract_eval_script_from_response(
         )
         fixed = _sanitize_eval_script(fixed)
         fixed = _ensure_pytest_targets_generated_files(fixed, target_test_files)
-        fixed = _ensure_pytest_addopts_override(fixed)
         content = _ensure_pytest_targets_generated_files(content, target_test_files)
-        content = _ensure_pytest_addopts_override(content)
         with open(script_skeleton_path, "w") as f:
             f.write(content)
         with open(script_path, "w") as f:
@@ -453,7 +423,7 @@ def extract_eval_script_from_response(
 
     # Pattern 3: ```bash code block
     if not script_extracted:
-        for content in re.findall(r"```\s*bash.*([\s\S]*?)```", res_text, re.IGNORECASE):
+        for content in re.findall(r"```\s*bash\s*\n([\s\S]*?)```", res_text, re.IGNORECASE):
             cleaned = _clean(content)
             if cleaned:
                 _write(cleaned)
@@ -488,7 +458,6 @@ def write_eval_script_from_content(
 
     skeleton = _sanitize_eval_script(content)
     skeleton = _ensure_pytest_targets_generated_files(skeleton, target_test_files)
-    skeleton = _ensure_pytest_addopts_override(skeleton)
 
     fixed = replace_heredoc_content(
         content, test_patch,
@@ -498,7 +467,6 @@ def write_eval_script_from_content(
     )
     fixed = _sanitize_eval_script(fixed)
     fixed = _ensure_pytest_targets_generated_files(fixed, target_test_files)
-    fixed = _ensure_pytest_addopts_override(fixed)
 
     def _finalize(s: str) -> str:
         if "OMNIGRIL_EXIT_CODE" not in s:

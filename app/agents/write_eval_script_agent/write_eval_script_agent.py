@@ -54,26 +54,34 @@ class WriteEvalScriptAgent(Agent):
         return os.path.join(self.output_dir, f"write_eval_script_agent_{self.run_count}")
 
     def get_initial_eval_script_skeleton(self):
+        header = [
+            "#!/bin/bash",
+            "set -uxo pipefail",
+            "cd /testbed",
+            'export PYTEST_ADDOPTS="--override-ini=addopts="',
+        ]
+
+        if not (self.test_patch and self.test_patch.strip()):
+            return "\n".join(header) + "\n"
+
+        if self.test_files_content:
+            # Content is available — embed it directly so the LLM sees real file content.
+            # No placeholder needed; replace_heredoc_content becomes a no-op for this case.
+            heredoc_block = write_eval_script_utils._generate_cat_heredoc_block(self.test_files_content)
+            return "\n".join(header) + "\n" + heredoc_block + "\n"
+
+        # Content not yet materialized — fall back to placeholders.
         test_files = list(dict.fromkeys(list(self.test_files_content.keys()) + self.test_files))
-
-        # Collect directories needed for all test files
         all_dirs = sorted({os.path.dirname(f) for f in test_files if os.path.dirname(f)})
-        quoted_dirs = ['"' + d + '"' for d in all_dirs]
-
-        eval_commands = ["cd /testbed"]
-
-        if quoted_dirs:
-            eval_commands.append("mkdir -p " + " ".join(quoted_dirs))
-
-        # Write test files via cat heredocs (content injected by post-processor)
-        if self.test_patch and self.test_patch.strip():
-            for i, f in enumerate(test_files):
-                delim = f"EOF_TEST_{i}"
-                eval_commands.append(f"cat <<'{delim}' > \"{f}\"")
-                eval_commands.append("[TEST FILE CONTENT]")
-                eval_commands.append(delim)
-
-        return "\n".join(["#!/bin/bash", "set -uxo pipefail"] + eval_commands) + "\n"
+        body = []
+        if all_dirs:
+            body.append("mkdir -p " + " ".join(f'"{d}"' for d in all_dirs))
+        for i, f in enumerate(test_files):
+            delim = f"EOF_TEST_{i}"
+            body.append(f"cat <<'{delim}' > \"{f}\"")
+            body.append("[TEST FILE CONTENT]")
+            body.append(delim)
+        return "\n".join(header + body) + "\n"
 
     def get_latest_eval_script_skeleton(self) -> str:
         skel_path = os.path.join(self.get_latest_write_output_dir(), "eval_skeleton.sh")

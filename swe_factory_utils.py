@@ -108,6 +108,34 @@ DEFAULT_REPO_EVAL_CONFIG = REPO_EVAL_CONFIG["MiroMindAI/miroflow"]
 
 
 # ---------------------------------------------------------------------------
+# JSON extraction from LLM responses
+# ---------------------------------------------------------------------------
+
+
+def extract_json_from_response(res_text: str) -> str:
+    """Extract a JSON block from an LLM response.
+
+    Tries ```json ... ``` first, then any ``` ... ``` block that parses as
+    valid JSON. Returns the original text if nothing matches.
+    """
+    import json as _json
+
+    json_matches = re.findall(r"```json([\s\S]*?)```", res_text, re.IGNORECASE)
+    if json_matches:
+        return json_matches[0].strip()
+
+    for block in re.findall(r"```([\s\S]*?)```", res_text, re.IGNORECASE):
+        clean = block.strip()
+        try:
+            _json.loads(clean)
+            return clean
+        except _json.JSONDecodeError:
+            continue
+
+    return res_text
+
+
+# ---------------------------------------------------------------------------
 # Repo-specific git clean command
 # ---------------------------------------------------------------------------
 

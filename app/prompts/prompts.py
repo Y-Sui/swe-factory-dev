@@ -161,13 +161,40 @@ RUN echo "source /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbe
 """
 
 
-DOCKERFILE_USER_PROMPT_MODIFY = """The previous Dockerfile attempt failed. Modify it based on the feedback above.
+DOCKERFILE_USER_PROMPT_MODIFY = """The previous Dockerfile attempt failed. Read the error carefully and fix the root cause.
 
-Rules:
+### Rules
 - Keep the `FROM` line exactly as-is — do NOT change the base image.
 - Do NOT add `git clone` — the repo is already at `/testbed`.
 - Do NOT run tests inside the Dockerfile.
 - Do NOT repeat steps already done by the base image (refer to the base Dockerfile content shown earlier).
+
+### Common failure patterns and fixes
+
+**Package not found / pip install fails**
+- Check for typos in the package name.
+- The package may not exist on PyPI at the pinned version — try relaxing the version or omitting it.
+- For uv-based repos: prefer `uv pip install <pkg>` over `pip install` to stay inside the existing `.venv`.
+
+**`uv: command not found` or `.venv` missing**
+- The base image may not have uv installed. Add: `RUN pip install uv` or `RUN curl -Ls https://astral.sh/uv/install.sh | sh`.
+- Never run `uv venv` — the `.venv` is already created by the base image. Only run `uv sync` or `uv pip install`.
+
+**`ModuleNotFoundError` during build**
+- The repo was not installed in editable mode. Add: `RUN pip install -e .` (or `uv pip install -e .` for uv repos) after cloning/checkout.
+- For repos with extras: `pip install -e ".[dev]"` or `pip install -e ".[test]"`.
+
+**Python version mismatch**
+- The repo requires a specific Python version. Check `pyproject.toml` or `setup.py` for `python_requires`.
+- Install the correct version via `apt` or `conda` before installing dependencies.
+
+**`git checkout` fails (detached HEAD / ref not found)**
+- Use `git reset --hard <commit>` instead of `git checkout <commit>` when already inside the repo.
+- Run `git fetch --unshallow` first if the repo was cloned with `--depth`.
+
+**Build hangs or times out**
+- Avoid installing heavy optional dependencies (e.g., `torch`, `tensorflow`) unless they are strictly required by the test files.
+- Use `--no-cache-dir` with pip to reduce layer size.
 
 Return the corrected Dockerfile wrapped in <dockerfile></dockerfile>.
 """
@@ -514,10 +541,9 @@ EVAL_SCRIPT_USER_PROMPT_INIT = """Generate an **evaluation script** based on the
 The script must execute the provided test files inside the specified Docker environment.
 
 ### **Requirements:**
-1. **Activate the environment**: Ensure the correct environment (e.g., Conda, venv) is activated before running the tests.
-2. **Apply the test patch (if required)**: The test patch may need to be applied before running the tests.
-3. **Execute the given test files** using the correct command found by the context retrieval agent.
-4. **Do NOT reset tracked files in eval.sh unless absolutely required for listed test files.**
+1. **Activate the environment if needed**: Use the activation method shown in the repo environment template (e.g., `source .venv/bin/activate` for uv projects, `conda activate testbed` for conda projects). If the skeleton already handles this, do not repeat it.
+2. **Execute the given test files** using the correct command shown in the repo environment template.
+3. **Do NOT reset tracked files in eval.sh unless absolutely required for listed test files.**
    - Avoid `git checkout ...` on source files: it can silently undo Dockerfile hotfixes needed by the environment.
 
 ### Important Notes:
@@ -534,39 +560,34 @@ The script must execute the provided test files inside the specified Docker envi
    - Avoid excessive debug information or unrelated output in eval script, but **do not suppress key test execution details**.
    - Avoid running all tests! **Just run the target test files**.
 
-4. **Follow the structure of the reference evaluation script or eval script skeleton whenever available.**
-   - Use **a simple, minimalistic structure** similar to the reference eval script to ensure clarity and maintainability.
-   - The script should be easy to modify and extend without unnecessary complexity.
+4. **Follow the eval script skeleton exactly** — it already contains the correct `cd`, `export PYTEST_ADDOPTS`, `mkdir`, and `cat` heredoc blocks. Your job is to add the correct test runner command after the heredocs.
 
 5. **Test files are written via `cat` heredocs (one per file).** The placeholder content `[TEST FILE CONTENT]` will be programmatically replaced with the actual file content.
     - Use `cat <<'EOF_TEST_N' > "path/to/test.py"` for each test file.
     - Do NOT use `git apply` — always use `cat` heredocs to write test files directly.
 
 6. You MUST capture the exit code immediately after running the tests using `rc=$?`, and then echo: `OMNIGRIL_EXIT_CODE=$rc`. This ensures the judge can determine whether the tests passed successfully.
-7. For pytest commands, include `--override-ini="addopts="` to neutralize repo-level addopts (e.g., `-n=auto`, `--cov`) that can destabilize evaluation.
 
 Eval script skeleton:
 {eval_script_skeleton}
 
 ### **Example Format:**
-The script must be wrapped in `<script>` tags. Example:
+The script must be wrapped in `<script>` tags. The example below shows the expected structure — use the repo environment template to determine the correct pytest binary and working directory for your specific repo:
 
 <script>
 #!/bin/bash
 set -uxo pipefail
-source /opt/miniconda3/bin/activate
-conda activate testbed
 cd /testbed
-pip install -r test-requirements.txt && pip install -e .
+export PYTEST_ADDOPTS="--override-ini=addopts="
 
 # Required: write test files directly
-mkdir -p "mypy/test"
-cat <<'EOF_TEST_0' > "mypy/test/testcheck.py"
+mkdir -p "tests"
+cat <<'EOF_TEST_0' > "tests/test_my_fix.py"
 [TEST FILE CONTENT]
 EOF_TEST_0
 
-# Required: run target tests files instead of all tests!
-pytest --no-header -rA --tb=no -p no:cacheprovider -n4 --override-ini="addopts=" mypy/test/testcheck.py::TypeCheckSuite::check-functions.test mypy/test/testcheck.py::TypeCheckSuite::check-redefine.test
+# Required: run only the target test files (use the correct pytest binary for this repo)
+pytest tests/test_my_fix.py -v
 rc=$?            #Required, save exit code
 echo "OMNIGRIL_EXIT_CODE=$rc" #Required, echo test status
 </script>
@@ -577,17 +598,16 @@ EVAL_SCRIPT_USER_PROMPT_INIT_WITH_DOWNLOADS = """Generate an **evaluation script
 The script must execute the provided test files inside the specified Docker environment.
 
 ### **Requirements:**
-1. **Activate the environment**: Ensure the correct environment (e.g., Conda, venv) is activated before running the tests.
-2. **Apply the test patch (if required)**: The test patch may need to be applied before running the tests.
-3. **Execute the given test files** using the correct command found by the context retrieval agent.
-4. **Do NOT reset tracked files in eval.sh unless absolutely required for listed test files.**
+1. **Activate the environment if needed**: Use the activation method shown in the repo environment template. If the skeleton already handles this, do not repeat it.
+2. **Execute the given test files** using the correct command shown in the repo environment template.
+3. **Do NOT reset tracked files in eval.sh unless absolutely required for listed test files.**
    - Avoid `git checkout ...` on source files: it can silently undo Dockerfile hotfixes needed by the environment.
 
 ### Important Notes:
 1. You must **execute only the specified target test files**, rather than running all tests in the repository.
 2. **Optimize execution efficiency by combining multiple test commands into a single command** whenever possible.
 3. **Ensure that the output of the evaluation script is concise and structured**.
-4. **Follow the structure of the reference evaluation script or eval script skeleton whenever available.**
+4. **Follow the eval script skeleton exactly** — it already contains the correct `cd`, `export PYTEST_ADDOPTS`, `mkdir`, and `cat` heredoc blocks. Your job is to add the correct test runner command after the heredocs.
 5. **Test files are written via `cat` heredocs (one per file).** The placeholder content `[TEST FILE CONTENT]` will be programmatically replaced with the actual file content.
     - Use `cat <<'EOF_TEST_N' > "path/to/test.py"` for each test file.
     - Do NOT use `git apply` — always use `cat` heredocs to write test files directly.
@@ -595,36 +615,32 @@ The script must execute the provided test files inside the specified Docker envi
 7. Test resources to download/remove:
     - For each resource that needs to be added, use wget with the -O <path> flag to download it directly into its target location.
     - For each resource that needs to be removed, issue a `rm -f <path>` command.
-    - Integrate these download/remove commands immediately after resetting the tests.
-
-8. For pytest commands, include `--override-ini="addopts="` to neutralize repo-level addopts (e.g., `-n=auto`, `--cov`) that can destabilize evaluation.
+    - Integrate these download/remove commands immediately after the heredoc blocks.
 
 Eval script skeleton:
 {eval_script_skeleton}
 
 ### **Example Format:**
-The script must be wrapped in `<script>` tags. Example:
+The script must be wrapped in `<script>` tags. The example below shows the expected structure — use the repo environment template to determine the correct pytest binary and working directory for your specific repo:
 
 <script>
 #!/bin/bash
 set -uxo pipefail
-source /opt/miniconda3/bin/activate
-conda activate testbed
 cd /testbed
-pip install -r test-requirements.txt && pip install -e .
+export PYTEST_ADDOPTS="--override-ini=addopts="
 
-# Required: download and remove test_resources
-wget -O /testbed/test/xmp_no_prefix.jpg https://raw.githubusercontent.com/owner/python/mypy/xxxx/head/test/xmp_no_prefix.jpg || exit 1
+# Required: download and remove test resources
+wget -O /testbed/test/xmp_no_prefix.jpg https://raw.githubusercontent.com/owner/repo/xxxx/test/xmp_no_prefix.jpg || exit 1
 rm -f /testbed/test/xmp_no_prefix_old.jpg
 
 # Required: write test files directly
-mkdir -p "mypy/test"
-cat <<'EOF_TEST_0' > "mypy/test/testcheck.py"
+mkdir -p "tests"
+cat <<'EOF_TEST_0' > "tests/test_my_fix.py"
 [TEST FILE CONTENT]
 EOF_TEST_0
 
-# Required: run target tests files instead of all tests!
-pytest --no-header -rA --tb=no -p no:cacheprovider -n4 --override-ini="addopts=" mypy/test/testcheck.py::TypeCheckSuite::check-functions.test mypy/test/testcheck.py::TypeCheckSuite::check-redefine.test
+# Required: run only the target test files (use the correct pytest binary for this repo)
+pytest tests/test_my_fix.py -v
 rc=$?            #Required, save exit code
 echo "OMNIGRIL_EXIT_CODE=$rc" #Required, echo test status
 </script>

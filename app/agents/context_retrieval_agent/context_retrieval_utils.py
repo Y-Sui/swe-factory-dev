@@ -10,6 +10,7 @@ from app.utils import parse_function_invocation
 import json
 from app.post_process import ExtractStatus, is_valid_json
 import itertools
+from swe_factory_utils import extract_json_from_response
 from app.prompts.prompts import (
     CONTEXT_RETRIEVAL_SYSTEM_PROMPT,
     CONTEXT_RETRIEVAL_USER_PROMPT,
@@ -385,24 +386,27 @@ def is_valid_response_proxy(data: Any) -> tuple[bool, str]:
     if not isinstance(data, dict):
         return False, "Json is not a dict"
 
-    if not data.get("terminate"):
-        terminate = data.get("terminate")
-        if terminate is None:
-            return False, "'terminate' parameter is missing"
+    terminate = data.get("terminate")
+    if terminate is None:
+        return False, "'terminate' parameter is missing"
+    if not isinstance(terminate, bool):
+        return False, "'terminate' parameter must be a boolean (true/false)"
 
-        if not isinstance(terminate, bool):
-            return False, "'terminate' parameter must be a boolean (true/false)"
-
+    if terminate:
+        # When terminating, validate collected_information
+        summary = data.get("collected_information")
+        if summary is None:
+            return False, "'collected_information' parameter is missing"
+        if not isinstance(summary, str):
+            return False, "'collected_information' parameter must be a str"
     else:
-        if not data.get("collected_information"):
-            summary = data.get("collected_information")
-            if summary is None:
-                return False, "'collected_information' parameter is missing"
-
-            if not isinstance(summary, str):
-                return False, "'collected_information' parameter must be a str"   
-
-        for api_call in data["API_calls"]:
+        # When not terminating, validate API_calls
+        api_calls = data.get("API_calls")
+        if api_calls is None:
+            return False, "'API_calls' parameter is missing"
+        if not isinstance(api_calls, list):
+            return False, "'API_calls' parameter must be a list"
+        for api_call in api_calls:
             if not isinstance(api_call, str):
                 return False, "Every API call must be a string"
 
@@ -410,7 +414,7 @@ def is_valid_response_proxy(data: Any) -> tuple[bool, str]:
                 func_name, func_args = parse_function_invocation(api_call)
             except Exception:
                 return False, "Every API call must be of form api_call(arg1, ..., argn)"
-            function = getattr( RepoBrowseManager, func_name, None)
+            function = getattr(RepoBrowseManager, func_name, None)
             if function is None:
                 return False, f"the API call '{api_call}' calls a non-existent function"
 
@@ -421,33 +425,6 @@ def is_valid_response_proxy(data: Any) -> tuple[bool, str]:
                 return False, f"the API call '{api_call}' has wrong number of arguments"
 
     return True, "OK"
-
-
-def extract_json_from_response(res_text: str):
-    """
-    从文本响应中提取 JSON 代码块
-    """
-    json_extracted = None
-
-    # Pattern 1: 识别 ```json 标记的代码块
-    json_matches = re.findall(r"```json([\s\S]*?)```", res_text, re.IGNORECASE)
-    if json_matches:
-        json_extracted = json_matches[0].strip()
-
-    # Pattern 2: 识别普通的 ``` 代码块
-    if not json_extracted:
-        json_code_blocks = re.findall(r"```([\s\S]*?)```", res_text, re.IGNORECASE)
-        for content in json_code_blocks:
-            clean_content = content.strip()
-            # 尝试解析为 JSON，确保是 JSON 格式
-            try:
-                json.loads(clean_content)  # 测试是否有效 JSON
-                json_extracted = clean_content
-                break
-            except json.JSONDecodeError:
-                continue  # 跳过非 JSON 代码块
-
-    return json_extracted if json_extracted else res_text  # 返回提取的 JSON 或原始文本
 
 
 BROWSE_CONTENT_PROMPT = """
