@@ -13,7 +13,6 @@ Usage:
     python scripts/post_fix_failed_cases.py \
         --setup-dir internal-swe-bench-data/MiroMindAI__miroflow/setup_output_2026-03-03 \
         --instances-jsonl internal-swe-bench-data/MiroMindAI__miroflow/instances_selected_36.jsonl \
-        --num-processes 5 \
         [--instance INSTANCE_ID]  # optional: run only one instance
         [--skip-docker]           # optional: skip Docker F2P validation
 """
@@ -22,10 +21,7 @@ import argparse
 import json
 import os
 import sys
-import threading
-import tempfile
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from os.path import join as pjoin
 from pathlib import Path
 from typing import Any
@@ -66,14 +62,8 @@ class Colors:
     DIM = "\033[2m"
 
 
-# Lock for thread-safe printing
-_print_lock = threading.Lock()
-
-
 def _tprint(*args, **kwargs):
-    """Thread-safe print."""
-    with _print_lock:
-        print(*args, **kwargs)
+    print(*args, **kwargs)
 
 
 def print_header(msg: str):
@@ -1209,10 +1199,6 @@ def main():
         help="Path to instances JSONL file",
     )
     parser.add_argument(
-        "--num-processes", type=int, default=5,
-        help="Number of parallel workers (default: 5)",
-    )
-    parser.add_argument(
         "--instance", default=None,
         help="Run only this instance ID (optional)",
     )
@@ -1253,7 +1239,6 @@ def main():
         color = Colors.RED if cls == "FAIL2FAIL" else Colors.YELLOW
         print(f"    {color}{cls}{Colors.RESET}: {count}")
 
-    # Initialize model (singleton, shared across threads)
     print(f"\n  Initializing ClaudeOpus4_6 model...")
     model = create_model()
     print_success("Model ready")
@@ -1266,53 +1251,24 @@ def main():
             continue
         work_items.append(instances_map[instance_id])
 
-    num_workers = min(args.num_processes, len(work_items)) if work_items else 1
     print(f"\n  Processing {Colors.BOLD}{len(work_items)}{Colors.RESET} instances "
-          f"(max {args.max_rounds} rounds each, {num_workers} parallel workers)")
+          f"(max {args.max_rounds} rounds each, sequential)")
     if args.skip_docker:
         print(f"  {Colors.YELLOW}Docker F2P validation: SKIPPED{Colors.RESET}")
     print()
 
-    # Process instances (parallel or sequential)
+    # Process instances sequentially
     results: list[dict[str, Any]] = []
-
-    def _worker(idx_and_data: tuple[int, dict]) -> dict[str, Any]:
-        idx, inst_data = idx_and_data
+    for i, inst_data in enumerate(work_items, 1):
         iid = inst_data["instance_id"]
-        _tprint(f"{Colors.BOLD}[{idx}/{len(work_items)}] {iid}{Colors.RESET}")
+        print(f"{Colors.BOLD}[{i}/{len(work_items)}] {iid}{Colors.RESET}")
         r = post_fix_instance(
             args.setup_dir, inst_data, model,
             skip_docker=args.skip_docker,
             max_rounds=args.max_rounds,
         )
-        _tprint()
-        return r
-
-    if num_workers <= 1:
-        for i, inst_data in enumerate(work_items, 1):
-            results.append(_worker((i, inst_data)))
-    else:
-        indexed_items = list(enumerate(work_items, 1))
-        with ThreadPoolExecutor(max_workers=num_workers) as pool:
-            futures = {
-                pool.submit(_worker, item): item[1]["instance_id"]
-                for item in indexed_items
-            }
-            for future in as_completed(futures):
-                iid = futures[future]
-                try:
-                    results.append(future.result())
-                except Exception as e:
-                    logger.error(f"[{iid}] Worker exception: {e}")
-                    results.append({
-                        "instance_id": iid,
-                        "success": False,
-                        "output_dir": None,
-                        "old_classification": None,
-                        "new_classification": None,
-                        "rounds_used": 0,
-                        "error": str(e),
-                    })
+        print()
+        results.append(r)
 
     # =========================================================================
     # Summary
