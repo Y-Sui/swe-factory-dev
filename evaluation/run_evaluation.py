@@ -3,6 +3,7 @@ from __future__ import annotations
 import docker
 import json
 import resource
+import sys
 import traceback
 import os
 from argparse import ArgumentParser
@@ -10,6 +11,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tqdm import tqdm
 from docker import DockerClient
+
+# Ensure project root is on sys.path so swe_factory_utils is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from swe_factory_utils import extract_exit_code
 from docker_utils import (
