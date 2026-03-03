@@ -333,9 +333,10 @@ Do NOT add `ENV PATH=...` — call pytest via `.venv/bin/pytest` (see eval.sh pa
 
 ## Project layout & import paths
 - pyproject.toml: `[tool.hatch.build.targets.wheel] packages = ["src"]`
-- This means `src/` IS the package root — there is NO `miroflow` top-level package.
-- CORRECT imports: `from core.foo import Bar`, `from llm.client import X`, `from utils.helper import Y`
-- WRONG imports: `from src.core.foo import Bar`, `from miroflow.core.foo import Bar`
+- The editable install adds the **repo root** (`/testbed`) to sys.path, not `src/` itself.
+- Therefore `src/` is a visible sub-package directory at the repo root.
+- CORRECT imports: `from src.core.foo import Bar`, `from src.llm.client import X`, `from src.utils.helper import Y`
+- WRONG imports: `from core.foo import Bar`, `from miroflow.core.foo import Bar`
 
 ## eval.sh pattern (MUST follow exactly)
 ```bash
@@ -378,9 +379,10 @@ Do NOT add `ENV PATH=...` — call pytest via `.venv/bin/pytest` (see eval.sh pa
 
 ## Project layout & import paths
 - `apps/miroflow-agent/pyproject.toml`: `[tool.hatch.build.targets.wheel] packages = ["src"]`
-- This means `src/` IS the package root relative to `apps/miroflow-agent/`.
-- CORRECT imports: `from core.foo import Bar`, `from llm.client import X`
-- WRONG imports: `from src.core.foo import Bar`, `from miroflow.core.foo import Bar`
+- The editable install adds `apps/miroflow-agent/` (the sub-project root) to sys.path, not `src/` itself.
+- Therefore `src/` is a visible sub-package directory under the sub-project root.
+- CORRECT imports: `from src.core.foo import Bar`, `from src.llm.client import X`
+- WRONG imports: `from core.foo import Bar`, `from miroflow.core.foo import Bar`
 - Monorepo: `apps/miroflow-agent/` is the main app, `libs/miroflow-tools/` is the lib
 - Key deps: anthropic, openai, mcp, fastmcp, e2b-code-interpreter, hydra-core, transformers
 
@@ -689,10 +691,7 @@ The Docker environment is already built — the repo is at `/testbed` at the cor
   - New feature → call the new API; test naturally fails pre-patch (AttributeError/TypeError) and passes post-patch
 - **No over-mocking**: never mock the function/class the patch is fixing; only mock external I/O
 - **Concrete assertions**: `assert result == specific_value`, not `assert result` or `assert result is not None`
-- **Import paths**: use the module path relative to the package root, not to the repo root. The repo environment template (provided separately) specifies the exact import style for this repo.
-- **`packages = ["src"]` rule**: if the template says this, strip `src/` from import paths.
-  - Example: file `.../src/core/pipeline.py` → import `from core.pipeline import ...`
-  - Never import with `from src...` and never prefix imports with the repo name.
+- **Import paths**: use **exactly the import style shown in the "Import examples from existing code" section** (provided in the user message below). If no examples are provided, follow the import style in the repo environment template. Do NOT guess — wrong imports cause ModuleNotFoundError and FAIL2FAIL.
 - **Nested/private symbols**: if a target function is nested inside another function or otherwise not importable, test it through the public callable that executes that logic, or use AST extraction to test the actual source. Strategies:
   1. **AST extraction** (preferred for simple nested functions): use `ast.get_source_segment()` + `textwrap.dedent()` + `exec()` to extract the nested function from the source file and test it directly with a lightweight stand-in for its dependencies.
   2. **End-to-end through public API**: call the enclosing public function with appropriate mocking of I/O and external dependencies to reach the nested code path.

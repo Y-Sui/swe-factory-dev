@@ -1,37 +1,21 @@
+from app.data_structures import MessageThread
 from app.agents.write_eval_script_agent import write_eval_script_utils
 from app.agents.agent import Agent
 from app.task import SweTask
 import os
 import re
+import shutil
 from app.log import print_banner
+from os.path import join as pjoin
 from loguru import logger
 
 DIFF_MODIFIED_FILE_REGEX = r"--- a/(.*)"
 DIFF_NEW_FILE_REGEX = r"\+\+\+ b/(.*)"
 
-# Repo-specific workdir and pytest command. {files} is replaced with space-separated test paths.
-# Note: --override-ini="addopts=" is omitted — _ensure_pytest_addopts_override() adds it in post-processing.
-_REPO_EVAL_CONFIG = {
-    "MiroMindAI/miroflow": {
-        "workdir": "/testbed",
-        "pytest_cmd": ".venv/bin/pytest {files} -xvs",
-    },
-    "MiroMindAI/MiroThinker": {
-        "workdir": "/testbed/apps/miroflow-agent",
-        "pytest_cmd": ".venv/bin/pytest {files} -xvs",
-    },
-    "MiroMindAI/sd-torchtune": {
-        "workdir": "/testbed",
-        "pytest_cmd": "pytest {files} -xvs --without-integration",
-    },
-}
-_DEFAULT_EVAL_CONFIG = _REPO_EVAL_CONFIG["MiroMindAI/miroflow"]
-
 
 class WriteEvalScriptAgent(Agent):
     """
-    Agent responsible for generating an evaluation script (`eval.sh`) deterministically
-    from a repo-specific template, without LLM calls.
+    Agent responsible for generating or modifying an evaluation script (`eval.sh`).
     """
     api_functions: list[str] = []
 
@@ -46,9 +30,9 @@ class WriteEvalScriptAgent(Agent):
         self.initial_skeleton = self.get_initial_eval_script_skeleton()
         self.run_count = 0
         self.repo_basic_info = repo_basic_info
-        # Keep these attributes so agents_manager.py can set them without errors.
         self.dockerfile: str | None = None
         self.pending_guidance: str | None = None
+        self.init_msg_thread()
 
     def get_test_files(self):
         patch = self.test_patch or ""
@@ -60,6 +44,11 @@ class WriteEvalScriptAgent(Agent):
                      if not p.startswith("/dev/null")]
         # Deduplicate while preserving order (modified files appear in both --- and +++)
         return list(dict.fromkeys(modified + new_files))
+
+    def init_msg_thread(self) -> None:
+        self.msg_thread = MessageThread()
+        self.add_system_message(write_eval_script_utils.get_system_prompt_eval_script())
+        self.add_user_message(self.repo_basic_info)
 
     def get_latest_write_output_dir(self) -> str:
         return os.path.join(self.output_dir, f"write_eval_script_agent_{self.run_count}")
@@ -103,42 +92,67 @@ class WriteEvalScriptAgent(Agent):
             logger.error(e)
             return None
 
-    def _build_eval_script(self) -> str:
-        config = _REPO_EVAL_CONFIG.get(self.task.repo, _DEFAULT_EVAL_CONFIG)
-        workdir = config["workdir"]
-
-        test_files = list(dict.fromkeys(list(self.test_files_content.keys()) + self.test_files))
-        file_args = " ".join(f'"{f}"' for f in test_files) if test_files else "tests/"
-        pytest_cmd = config["pytest_cmd"].format(files=file_args)
-
-        lines = ["#!/bin/bash", "set -uxo pipefail"]
-
-        all_dirs = sorted({os.path.dirname(f) for f in test_files if os.path.dirname(f)})
-        if all_dirs:
-            lines.append("mkdir -p " + " ".join(f'"{d}"' for d in all_dirs))
-
-        if self.test_patch and self.test_patch.strip():
-            for i, f in enumerate(test_files):
-                delim = f"EOF_TEST_{i}"
-                lines += [f"cat <<'{delim}' > \"{f}\"", "[TEST FILE CONTENT]", delim]
-
-        lines += [f"cd {workdir}", pytest_cmd]
-        return "\n".join(lines) + "\n"
-
     def run_task(self, print_callback=None) -> tuple[str, str, bool]:
+        """
+        Generate or modify the evaluation script. Returns raw_output, summary, success.
+        """
+        if self.run_count > 0:
+            self.init_msg_thread()
+            if self.pending_guidance:
+                self.add_user_message(self.pending_guidance)
+                self.pending_guidance = None
+
         print_banner(f"Task {self.task.task_id} Iteration ROUND {self.iteration_num}: Eval Script Generation")
 
+        prev_dir = self.get_latest_write_output_dir()
+        prev_skeleton = self.get_latest_eval_script_skeleton()
         self.run_count += 1
         curr_dir = self.get_latest_write_output_dir()
         os.makedirs(curr_dir, exist_ok=True)
 
-        content = self._build_eval_script()
-        write_eval_script_utils.write_eval_script_from_content(
-            content, curr_dir, self.test_patch,
+        prev_script = os.path.join(prev_dir, "eval.sh")
+        dockerfile_msg = f"The dockerfile environment you are running tests on:\n{self.dockerfile}\n\n"
+
+        if os.path.exists(prev_script):
+            self.add_user_message(dockerfile_msg)
+            test_patch_display = self.test_patch or "(none)"
+            msg_prev = (
+                f"Previous generated eval script skeleton:\n"
+                f"{prev_skeleton}\n\n"
+                f"Test patch that MUST be applied (do NOT modify this content):\n"
+                f"{test_patch_display}\n\n"
+            )
+            self.add_user_message(msg_prev)
+            self.add_user_message(
+                "Please modify current eval script according to collected information. "
+                "You MUST keep the `cat` heredoc blocks that write test files. "
+                "Do NOT rewrite the test file writing mechanism. "
+                "Return modified eval script in defined format. Wrap results in <script></script>."
+            )
+        else:
+            self.add_user_message(dockerfile_msg)
+            self.add_user_message(write_eval_script_utils.get_user_prompt_init_eval_script(self.initial_skeleton))
+
+        task_output = write_eval_script_utils.write_eval_script_with_retries(
+            self.msg_thread,
+            curr_dir,
+            self.test_patch or "",
             test_files_content=self.test_files_content,
             repo_root=self.task.project_path,
+            retries=3,
+            print_callback=print_callback,
         )
 
-        ok = os.path.isfile(os.path.join(curr_dir, "eval.sh"))
-        summary = "Evaluation script created." if ok else "Evaluation script generation failed."
-        return "", summary, ok
+        script_path = os.path.join(curr_dir, "eval.sh")
+        ok = os.path.isfile(script_path)
+        if not ok and os.path.exists(prev_script):
+            shutil.copy(prev_script, script_path)
+            ok = False
+
+        summary = (
+            "Evaluation script created/updated successfully." if ok
+            else "Evaluation script generation failed."
+        )
+        conversation_file = pjoin(curr_dir, "conversation.json")
+        self.msg_thread.save_to_file(conversation_file)
+        return task_output, summary, ok

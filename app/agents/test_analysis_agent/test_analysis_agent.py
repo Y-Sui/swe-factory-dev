@@ -28,6 +28,7 @@ from swe_factory_utils import (
     extract_exit_code as _extract_exit_code,
     classify_f2p,
     ensure_essentials_in_dockerfile as _ensure_essentials_in_dockerfile,
+    get_clean_command_for_repo,
 )
 MAX_LINE_NUM = 600
 ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
@@ -51,9 +52,7 @@ class TestAnalysisAgent(Agent):
         self.repo_basic_info = repo_basic_info
         self.task_id = task.task_id.lower()
         self.client = client
-        self.test_analysis_dir = os.path.join(self.output_dir, "test_analysis_agent") 
-        # self.build_image_dir = os.path.join(self.output_dir, "build_image") 
-        # self.run_test_dir = os.path.join(self.output_dir, "run_test") 
+        self.test_analysis_dir = os.path.join(self.output_dir, "test_analysis_agent")
         self.eval_script_skeleton: str | None = None
         self.dockerfile: str | None = None
         self.eval_script: str | None = None
@@ -62,17 +61,6 @@ class TestAnalysisAgent(Agent):
         self.f2p_classification: str | None = None
         self._cached_image_name: str | None = None   # image tag of last successfully built image
         self._cached_dockerfile: str | None = None   # dockerfile content used for that build
-        # self.init_msg_thread()
-
-    def _get_clean_command(self) -> str:
-        """Return a repo-aware git clean command that preserves uv virtualenvs."""
-        if self.task.repo_name == "MiroMindAI/miroflow":
-            return "git clean -fdx -e .venv"
-        if self.task.repo_name == "MiroMindAI/MiroThinker":
-            return "git clean -fdx -e .venv -e apps/miroflow-agent/.venv"
-        return "git clean -fdx"
-
-
 
     def init_msg_thread(self) -> None:
         """
@@ -477,7 +465,7 @@ class TestAnalysisAgent(Agent):
                 user="root",
             )
             container.exec_run(
-                self._get_clean_command(),
+                get_clean_command_for_repo(self.task.repo_name),
                 workdir="/testbed",
                 user="root",
             )
