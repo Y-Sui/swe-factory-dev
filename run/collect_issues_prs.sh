@@ -1,53 +1,62 @@
 #!/bin/bash
-# Collect raw issue data from MiroMindAI/MiroThinker, MiroMindAI/miroflow, and MiroMindAI/sd-torchtune
+# Collect PRs, build instances, and refine problem statements for all target repos.
 #
 # Usage:
-#   export GITHUB_TOKEN=<your_token>
-#   cd swe-factory && bash run/collect_miro_issues.sh
+#   cd swe-factory-dev && bash run/collect_issues_prs.sh
 
 set -euo pipefail
 
-# Load environment variables
 set -a
 source "$(dirname "$0")/../.env"
 set +a
 
 SCRIPT_DIR="data_collection/collect"
 DATA_DIR="/data/yuansui/internal-swe-bench-data"
-mkdir -p "$DATA_DIR"
+CUTOFF_DATE="2026-12-31T23:59:59Z"
 
-# Step 1: Collect PRs
-echo "=== Collecting PRs from MiroMindAI/MiroThinker ==="
-mkdir -p "$DATA_DIR/MiroMindAI__MiroThinker"
-python3 "$SCRIPT_DIR/print_pulls.py" MiroMindAI/MiroThinker "$DATA_DIR/MiroMindAI__MiroThinker/prs.jsonl" --mode omnigirl
 
-echo "=== Collecting PRs from MiroMindAI/miroflow ==="
-mkdir -p "$DATA_DIR/MiroMindAI__miroflow"
-python3 "$SCRIPT_DIR/print_pulls.py" MiroMindAI/miroflow "$DATA_DIR/MiroMindAI__miroflow/prs.jsonl" --mode omnigirl
+# mkdir -p "$DATA_DIR/MiroMindAI__MiroThinker"
+# mkdir -p "$DATA_DIR/MiroMindAI__sd-torchtune"
+# mkdir -p "$DATA_DIR/MiroMindAI__miroflow"
 
-echo "=== Collecting PRs from MiroMindAI/sd-torchtune ==="
-mkdir -p "$DATA_DIR/MiroMindAI__sd-torchtune"
-python3 "$SCRIPT_DIR/print_pulls.py" MiroMindAI/sd-torchtune "$DATA_DIR/MiroMindAI__sd-torchtune/prs.jsonl" --mode omnigirl
 
-# Step 2: Build task instances
-# Outputs per repo: instances_selected_{N}.jsonl and instances_ori_test_{N}.jsonl
-# Filters: skips README-only PRs and trivial changes (<=2 lines)
-echo "=== Building instances for MiroMindAI/MiroThinker ==="
-python3 "$SCRIPT_DIR/build_dataset.py" \
-  "$DATA_DIR/MiroMindAI__MiroThinker/prs.jsonl" \
-  "$DATA_DIR/MiroMindAI__MiroThinker" \
-  --mode omnigirl --language python --cutoff_date "2026-02-25T23:59:59Z"
+# echo "=== [MiroThinker] Step 1: Collecting PRs ==="
+# python3 "$SCRIPT_DIR/print_pulls.py" MiroMindAI/MiroThinker "$DATA_DIR/MiroMindAI__MiroThinker/prs.jsonl" --mode omnigirl
 
-echo "=== Building instances for MiroMindAI/miroflow ==="
-python3 "$SCRIPT_DIR/build_dataset.py" \
-  "$DATA_DIR/MiroMindAI__miroflow/prs.jsonl" \
-  "$DATA_DIR/MiroMindAI__miroflow" \
-  --mode omnigirl --language python --cutoff_date "2026-02-25T23:59:59Z"
+# echo "=== [sd-torchtune] Step 1: Collecting PRs ==="
+# python3 "$SCRIPT_DIR/print_pulls.py" MiroMindAI/sd-torchtune "$DATA_DIR/MiroMindAI__sd-torchtune/prs.jsonl" --mode omnigirl
 
-echo "=== Building instances for MiroMindAI/sd-torchtune ==="
-python3 "$SCRIPT_DIR/build_dataset.py" \
-  "$DATA_DIR/MiroMindAI__sd-torchtune/prs.jsonl" \
-  "$DATA_DIR/MiroMindAI__sd-torchtune" \
-  --mode omnigirl --language python --cutoff_date "2026-02-25T23:59:59Z"
+# echo "=== [miroflow] Step 1: Collecting PRs ==="
+# python3 "$SCRIPT_DIR/print_pulls.py" MiroMindAI/miroflow "$DATA_DIR/MiroMindAI__miroflow/prs.jsonl" --mode omnigirl
 
-echo "=== Done ==="
+
+# echo "=== [MiroThinker] Step 2: Building instances ==="
+# python3 "$SCRIPT_DIR/build_dataset.py" \
+#   "$DATA_DIR/MiroMindAI__MiroThinker/prs.jsonl" \
+#   "$DATA_DIR/MiroMindAI__MiroThinker" \
+#   --mode omnigirl --language python --cutoff_date "$CUTOFF_DATE"
+
+# echo "=== [miroflow] Step 2: Building instances ==="
+# python3 "$SCRIPT_DIR/build_dataset.py" \
+#   "$DATA_DIR/MiroMindAI__miroflow/prs.jsonl" \
+#   "$DATA_DIR/MiroMindAI__miroflow" \
+#   --mode omnigirl --language python --cutoff_date "$CUTOFF_DATE"
+
+# echo "=== [sd-torchtune] Step 2: Building instances ==="
+# python3 "$SCRIPT_DIR/build_dataset.py" \
+#   "$DATA_DIR/MiroMindAI__sd-torchtune/prs.jsonl" \
+#   "$DATA_DIR/MiroMindAI__sd-torchtune" \
+#   --mode omnigirl --language python --cutoff_date "$CUTOFF_DATE"
+
+
+
+echo "=== [MiroThinker] Step 3: Refining problem statements ==="
+python3 "$SCRIPT_DIR/refine_problem_statements.py" "$DATA_DIR/MiroMindAI__MiroThinker"
+
+echo "=== [miroflow] Step 3: Refining problem statements ==="
+python3 "$SCRIPT_DIR/refine_problem_statements.py" "$DATA_DIR/MiroMindAI__miroflow"
+
+echo "=== [sd-torchtune] Step 3: Refining problem statements ==="
+python3 "$SCRIPT_DIR/refine_problem_statements.py" "$DATA_DIR/MiroMindAI__sd-torchtune"
+
+echo "=== All repos processed. Output in $DATA_DIR ==="

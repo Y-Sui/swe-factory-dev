@@ -1,4 +1,7 @@
+import ast
+import base64
 import logging
+import os
 import re
 import requests
 import time
@@ -20,6 +23,21 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+BINARY_EXTENSIONS = {
+    # Images
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".bmp", ".tiff",
+    # Documents
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    # Archives
+    ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
+    # Media
+    ".mp3", ".mp4", ".wav", ".avi", ".mov",
+    # Fonts
+    ".ttf", ".otf", ".woff", ".woff2", ".eot",
+    # ML / data artifacts
+    ".pkl", ".pt", ".pth", ".bin", ".dat", ".db", ".sqlite", ".npy", ".npz",
+}
 
 PR_KEYWORDS = {
     "close",
@@ -86,6 +104,8 @@ class Repo:
                 response = requests.get(url, headers=headers)
                 if response.status_code == 200:
                     return response
+                elif response.status_code == 404:
+                    return response  # file not found at this commit — not retriable
                 elif response.status_code == 403 and 'X-RateLimit-Remaining' in response.headers:
                     remaining = int(response.headers['X-RateLimit-Remaining'])
                     if remaining == 0:
@@ -98,7 +118,8 @@ class Repo:
                         print(f'url:{url} 403 Forbidden: {response.json()}')
                         return response
                 else:
-                    print(f'Error: {response.status_code}, {response.text}')
+                    snippet = response.text[:200].replace('\n', ' ')
+                    logger.warning(f'[{url}] HTTP {response.status_code} (attempt {retries+1}/{max_retries}): {snippet}')
                     retries += 1
                     time.sleep(2 ** retries)
             except requests.exceptions.RequestException as e:
@@ -690,9 +711,312 @@ def get_with_retries(
         logger.warning(f"Failed to fetch {url}: {e}")
         return ""
 
+def _is_test_file(filename: str) -> bool:
+    """Return True if the file path looks like a test file (matches _split_patch logic)."""
+    words = set(re.split(r" |_|/|\.", filename.lower()))
+    return bool({"test", "tests", "testing"} & words)
+
+
+def fetch_commit_info(commit_sha: str, repo: "Repo") -> dict:
+    """
+    Fetch all commit data in a single GitHub API call.
+
+    The JSON response includes per-file patch fields, so we reconstruct the
+    full unified diff from them instead of making a separate diff-format request.
+
+    Returns a dict with:
+        patch:           code-only combined patch
+        test_patch:      test-only combined patch
+        py_file_patches: {filename: per-file patch string} for .py files (for AST analysis)
+        success:         whether the API call succeeded
+    """
+    url = f"https://api.github.com/repos/{repo.owner}/{repo.name}/commits/{commit_sha}"
+    response = repo.github_api(url=url, token=repo.token)
+    if response is None or response.status_code != 200:
+        return {"patch": "", "test_patch": "", "py_file_patches": {}, "success": False}
+
+    files = response.json().get("files", [])
+
+    full_patch_lines = []
+    py_file_patches = {}
+
+    for f in files:
+        ext = os.path.splitext(f["filename"])[1].lower()
+        if ext in BINARY_EXTENSIONS:
+            continue
+        file_patch = f.get("patch", "")
+        if not file_patch:
+            continue
+        # Only include target language files in the patch
+        if not f["filename"].endswith(".py"):
+            continue
+        full_patch_lines.append(f"diff --git a/{f['filename']} b/{f['filename']}")
+        full_patch_lines.append(file_patch)
+        if f.get("status") in ("modified", "added", "renamed", "copied") and not _is_test_file(f["filename"]):
+            py_file_patches[f["filename"]] = file_patch
+
+    full_patch = "\n".join(full_patch_lines)
+    patch_change_str, patch_test_str = _split_patch(full_patch) if full_patch else ("", "")
+
+    return {
+        "patch": patch_change_str,
+        "test_patch": patch_test_str,
+        "py_file_patches": py_file_patches,
+        "success": True,
+    }
+
+
+def fetch_file_at_commit(file_path: str, commit_sha: str, repo: "Repo") -> Optional[str]:
+    """
+    Fetch the raw content of a file at a specific commit via GitHub contents API.
+    Returns None if the file doesn't exist at that commit (e.g. newly created).
+    """
+    url = f"https://api.github.com/repos/{repo.owner}/{repo.name}/contents/{file_path}?ref={commit_sha}"
+    response = repo.github_api(url=url, token=repo.token)
+    if response is None or response.status_code != 200:
+        if response is not None and response.status_code == 404:
+            logger.debug(f"File not found at commit (likely newly added): {file_path}")
+        return None
+    data = response.json()
+    if data.get("encoding") == "base64":
+        return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+    return None
+
+
+def reconstruct_source_from_patch(file_patch: str) -> str:
+    """Reconstruct file content from an all-added patch (status=added)."""
+    lines = []
+    for line in file_patch.split("\n"):
+        if line.startswith("+++") or line.startswith("@@"):
+            continue
+        elif line.startswith("+"):
+            lines.append(line[1:])
+    return "\n".join(lines)
+
+
+def refine_problem_statement(patch_context: list[str], problem_statement: str, model) -> str:
+    """
+    Call LLM to produce a clearer, more concise problem statement for the benchmark,
+    grounded in both the raw GitHub issue/PR text and the actual code that was changed.
+
+    Args:
+        patch_context: list of formatted context strings, one per changed file.
+        problem_statement: raw GitHub issue / PR description.
+        model: an initialised app.model.gpt.OpenaiModel instance.
+
+    Returns the refined problem statement string, or the original if the LLM call fails.
+    """
+    context_str = "\n\n".join(patch_context) if patch_context else "(no code context available)"
+
+    system = (
+        "You are a technical writer preparing benchmark tasks for software engineers. "
+        "Given a raw GitHub PR/issue description and the code context of what was changed, "
+        "write a clear and concise problem statement. "
+        "The statement must be self-contained: a developer reading it should understand "
+        "exactly what needs to be fixed or implemented without reading the original PR."
+    )
+    user = f"""## Raw problem statement (from GitHub issue/PR)
+{problem_statement}
+
+## Code context (changed functions and module-level changes)
+{context_str}
+
+Write a clear, concise problem statement for this benchmark task. Focus on:
+- What the bug or issue is, or what feature needs to be added
+- What the expected behavior should be
+- Relevant technical details from the code context (e.g. which function, what condition)
+
+Return only the problem statement text, no headers or metadata."""
+
+    try:
+        content, *_ = model.call(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        return content.strip()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"refine_problem_statement failed: {e}, returning original")
+        return problem_statement
+
+
+def _split_file_patch_into_hunks(file_patch: str) -> list[tuple[tuple[int, int], str]]:
+    """Split a per-file patch into list of ((orig_start, orig_end), hunk_text) pairs."""
+    hunks = []
+    current_lines: list[str] = []
+    current_range: tuple[int, int] | None = None
+    for line in file_patch.split("\n"):
+        m = re.match(r"^@@ -(\d+)(?:,(\d+))? \+", line)
+        if m:
+            if current_range is not None:
+                hunks.append((current_range, "\n".join(current_lines)))
+            start = int(m.group(1))
+            count = int(m.group(2)) if m.group(2) is not None else 1
+            current_range = (start, start + max(count - 1, 0))
+            current_lines = [line]
+        elif current_range is not None:
+            current_lines.append(line)
+    if current_range is not None:
+        hunks.append((current_range, "\n".join(current_lines)))
+    return hunks
+
+
+def extract_changed_context(source: str, file_patch: str, file_path: str) -> str:
+    """
+    Expand changed hunks to full function bodies and return a formatted string
+    suitable for LLM consumption.
+
+    For hunks inside a function: shows the full function body with +/- annotations
+    on the changed lines and plain text for surrounding lines.
+    For hunks outside any function (module-level): shows the raw diff hunk verbatim.
+    Always includes top-level imports.
+
+    Example output:
+        --- a/src/client.py
+        +++ b/src/client.py
+
+        [imports]
+        import socket
+
+        [changed function: connect]
+        def connect(host, port):
+            sock = socket.socket()
+        -    sock.settimeout(DEFAULT_TIMEOUT)
+        +    sock.settimeout(DEFAULT_TIMEOUT * 2)
+            sock.connect((host, port))
+            return sock
+
+        [module-level changes]
+        @@ -12,3 +12,3 @@
+        -DEFAULT_TIMEOUT = 30
+        +DEFAULT_TIMEOUT = 60
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        return f"--- a/{file_path}\n+++ b/{file_path}\n[parse error: {e}]"
+
+    imports = [
+        ast.unparse(node) for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    ]
+
+    func_entries = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            func_entries.append((node.lineno, node.end_lineno, node.name, None))
+        elif isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    func_entries.append((item.lineno, item.end_lineno, item.name, node.name))
+
+    source_lines = source.splitlines()
+    hunks = _split_file_patch_into_hunks(file_patch)
+
+    # Map each hunk to the first overlapping function (or module-level if none).
+    func_hunk_map: dict[tuple, dict] = {}  # (name, class_ctx) -> {start, end, name, class_ctx, hunks}
+    module_level_hunks: list[tuple[tuple[int, int], str]] = []
+
+    for (hunk_start, hunk_end), hunk_text in hunks:
+        matched = False
+        for func_start, func_end, name, class_ctx in func_entries:
+            if func_start <= hunk_end and func_end >= hunk_start:
+                key = (name, class_ctx)
+                if key not in func_hunk_map:
+                    func_hunk_map[key] = {
+                        "start": func_start, "end": func_end,
+                        "name": name, "class_ctx": class_ctx, "hunks": [],
+                    }
+                func_hunk_map[key]["hunks"].append(((hunk_start, hunk_end), hunk_text))
+                matched = True
+                break
+        if not matched:
+            module_level_hunks.append(((hunk_start, hunk_end), hunk_text))
+
+    parts = [f"--- a/{file_path}", f"+++ b/{file_path}"]
+
+    if imports:
+        parts.append("\n[imports]")
+        parts.append("\n".join(imports))
+
+    # Emit changed functions in file order.
+    for func_info in sorted(func_hunk_map.values(), key=lambda x: x["start"]):
+        func_start = func_info["start"]
+        func_end = func_info["end"]
+        name = func_info["name"]
+        class_ctx = func_info["class_ctx"]
+        label = f"{class_ctx}.{name}" if class_ctx else name
+        parts.append(f"\n[changed function: {label}]")
+
+        # Build merged view: plain source lines outside hunks; inside hunks use the
+        # hunk text directly (context lines stripped of leading ' ', +/- kept as-is).
+        func_lines: list[str] = []
+        prev_end = func_start - 1
+        for (h_start, h_end), h_text in sorted(func_info["hunks"], key=lambda x: x[0][0]):
+            for ln in range(prev_end + 1, h_start):
+                func_lines.append(source_lines[ln - 1])
+            for line in h_text.split("\n"):
+                if line.startswith("@@") or line.startswith("\\ "):
+                    continue
+                elif line.startswith("-") or line.startswith("+"):
+                    func_lines.append(line)
+                else:
+                    func_lines.append(line[1:] if line.startswith(" ") else line)
+            prev_end = h_end
+        for ln in range(prev_end + 1, func_end + 1):
+            func_lines.append(source_lines[ln - 1])
+
+        parts.append("\n".join(func_lines))
+
+    if module_level_hunks:
+        parts.append("\n[module-level changes]")
+        for _, hunk_text in module_level_hunks:
+            parts.append(hunk_text)
+
+    return "\n".join(parts)
+
+
+def _split_patch(patch: str) -> tuple[str, str]:
+    """
+    Split a unified diff into (code_patch, test_patch) based on whether each
+    file path contains a test-related word.
+
+    Args:
+        patch (str): unified diff string
+    Return:
+        (patch_change_str, patch_test_str)
+    """
+    if patch.endswith("\n"):
+        patch = patch[:-1]
+
+    patch_change, patch_test = [], []
+    flag = None  # 'test', 'diff', or None (skip)
+
+    for line in patch.split("\n"):
+        if line.startswith("index "):
+            continue
+        if line.startswith("diff --git a/"):
+            words = set(re.split(r" |_|\/|\.", line.lower()))
+            flag = (
+                "test"
+                if ("test" in words or "tests" in words or "testing" in words)
+                else "diff"
+            )
+        if flag == "test":
+            patch_test.append(line)
+        elif flag == "diff":
+            patch_change.append(line)
+
+    patch_change_str = "\n".join(patch_change) + "\n" if patch_change else ""
+    patch_test_str = "\n".join(patch_test) + "\n" if patch_test else ""
+    return patch_change_str, patch_test_str
+
+
+
 def extract_patches(pull: dict, repo: Repo) -> tuple[str, str, bool]:
     """
-    Get patch and test patch from PR
+    Get patch and test patch from PR (combined diff of all commits).
 
     Args:
         pull (dict): PR dictionary object from GitHub
@@ -700,6 +1024,7 @@ def extract_patches(pull: dict, repo: Repo) -> tuple[str, str, bool]:
     Return:
         patch_change_str (str): gold patch
         patch_test_str (str): test patch
+        request_success (bool): whether the API call succeeded
     """
     # Use the GitHub API endpoint with Accept header to fetch diffs.
     # The web diff_url (github.com/...pull/N.diff) returns 404 for private repos
@@ -710,64 +1035,9 @@ def extract_patches(pull: dict, repo: Repo) -> tuple[str, str, bool]:
         repo.token,
         extra_headers={"Accept": "application/vnd.github.v3.diff"},
     )
-    if patch =='':
+    if patch == '':
         return "", "", False
-    if patch.endswith("\n"):
-        patch = patch[:-1]
-    # Create change patch and test patch
-    patch_change, patch_test = [], []
-
-    # Flag to determine if current diff block is a test or general change
-    # Values: 'test', 'diff', None
-    flag = None
-
-    for line in patch.split("\n"):
-        # Exclude commit specific metadata
-        if line.startswith("index "):
-            continue
-        # Determine if current diff block is a test or general change
-        if line.startswith("diff --git a/"):
-            words = set(re.split(r" |_|\/|\.", line.lower()))
-            flag = (
-                "test"
-                if ("test" in words or "tests" in words or "testing" in words)
-                else "diff"
-            )
-            if repo.language == 'python':
-                if flag != "test" and not line.strip().endswith(".py"):
-                    flag = None
-            elif repo.language == 'js':
-                language = get_language_with_pygments(line.strip())
-                is_js = (language=='javascript' or language == 'typescript')
-                if  ('webpack' in repo.name or 'jest' in repo.name)  and line.strip().endswith(".json"):
-                    is_js = True
-
-                if flag != "test" and not is_js:
-                    flag = None
-            elif repo.language == 'java':
-                file_name = line.split("/")[-1]
-                if file_name.endswith(".java"):
-                    file_name = file_name.replace(".java", "")
-                    if(file_name.startswith("Test") or file_name.startswith("Tests") or file_name.endswith("Test") or file_name.endswith("Tests")):
-                        flag = "test"
-
-                language = get_language_with_pygments(line.strip())
-                is_java = (language=='java')
-                if  ( 'netty' in repo.name)  and (line.strip().endswith(".c") or line.strip().endswith("pom.xml")):
-                    is_java = True
-
-                if flag != "test" and not is_java:
-                    flag = None
-
-                
-        # Append line to separate patch depending on flag status
-        if flag == "test":
-            patch_test.append(line)
-        elif flag == "diff":
-            patch_change.append(line)
-
-    patch_change_str = "\n".join(patch_change) + "\n" if len(patch_change) > 0 else ""
-    patch_test_str = "\n".join(patch_test) + "\n" if len(patch_test) > 0 else ""
+    patch_change_str, patch_test_str = _split_patch(patch)
     return patch_change_str, patch_test_str, True
 
 

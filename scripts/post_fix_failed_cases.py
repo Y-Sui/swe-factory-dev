@@ -21,10 +21,15 @@ import argparse
 import json
 import os
 import sys
+import time
 import traceback
+from docker import errors as docker_errors
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from os.path import join as pjoin
 from pathlib import Path
 from typing import Any
+from openai import OpenAI, RateLimitError
+from openai.types.chat import ChatCompletionMessageParam
 
 # Add project root to path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -319,24 +324,45 @@ Analyze the build error above and output a corrected Dockerfile wrapped in `<doc
 # Model helper
 # ---------------------------------------------------------------------------
 
-def create_model():
-    """Create and setup the ClaudeOpus4_6 model instance."""
-    from app.model.gpt import ClaudeOpus4_6
-    from app.model import common
-
-    model = ClaudeOpus4_6()
-    common.MODEL_TEMP = 0.2
-    model.setup()
-    return model
+# _MODEL_NAME = "anthropic/claude-opus-4.6"
+_MODEL_NAME = "google/gemini-2.5-flash"
+_MAX_TOKENS = 32768
 
 
-def call_model(model, messages: list[dict], temperature: float = 0.2) -> str:
-    """Call ClaudeOpus4_6 and return the response content string."""
-    content, _tool_calls, _func_calls, cost, in_tok, out_tok = model.call(
-        messages, temperature=temperature
+def create_model() -> OpenAI:
+    """Create a direct OpenAI-compatible client (no singleton, no tenacity)."""
+    return OpenAI(
+        api_key=os.environ["OPENAI_KEY"],
+        base_url=os.environ.get("OPENAI_API_BASE_URL"),
+        timeout=300,
     )
-    logger.info(f"LLM call: input={in_tok}, output={out_tok}, cost=${cost:.4f}")
-    return content
+
+
+def call_model(client: OpenAI, messages: list[ChatCompletionMessageParam], temperature: float = 0.2) -> str:
+    """Call the LLM with simple retry (short waits, avoids tenacity cascade)."""
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model=_MODEL_NAME,
+                messages=messages,
+                max_tokens=_MAX_TOKENS,
+                temperature=temperature,
+            )
+            content = resp.choices[0].message.content or ""
+            usage = resp.usage
+            if usage:
+                logger.info(
+                    f"LLM call: input={usage.prompt_tokens}, "
+                    f"output={usage.completion_tokens}"
+                )
+            return content
+        except RateLimitError:
+            if attempt == 2:
+                raise
+            wait = 15 * (attempt + 1)
+            logger.warning(f"Rate limited, retrying in {wait}s...")
+            time.sleep(wait)
+    raise RuntimeError("call_model: all attempts exhausted")
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +459,7 @@ def run_f2p_validation(
             if "error" in chunk:
                 err_msg = chunk["error"].strip()
                 build_log_lines.append(f"ERROR: {err_msg}")
-                raise docker.errors.BuildError(err_msg, build_log_lines)
+                raise docker_errors.BuildError(err_msg, iter(build_log_lines))
 
         # Save build log
         with open(pjoin(output_dir, "build_image.log"), "w") as f:
@@ -559,7 +585,7 @@ def run_f2p_validation(
         except Exception:
             pass
 
-    except docker.errors.BuildError as e:
+    except docker_errors.BuildError as e:
         result["error"] = f"Docker build failed: {e}"
         print_fail(f"Docker build failed")
         # Save build log
@@ -611,10 +637,11 @@ def _try_fix_dockerfile(
         dockerfile=ctx["dockerfile"],
         build_log=build_log,
     )
-    response = call_model(model, [
+    fix_messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
-    ])
+    ]
+    response = call_model(model, fix_messages)
 
     with open(pjoin(output_dir, "dockerfile_fix_response.txt"), "w") as f:
         f.write(response)
@@ -993,8 +1020,14 @@ def _run_one_round(
     new_test_files (dict path->content), f2p_result, error.
     """
     instance_id = instance_data["instance_id"]
-    output_dir = pjoin(inst_dir, f"post_fix_round_{round_num}")
-    os.makedirs(output_dir, exist_ok=True)
+    # Find a fresh writable directory — previous runs may have left root-owned dirs
+    base_name = f"post_fix_round_{round_num}"
+    output_dir = pjoin(inst_dir, base_name)
+    suffix = 0
+    while os.path.exists(output_dir):
+        suffix += 1
+        output_dir = pjoin(inst_dir, f"{base_name}_{suffix}")
+    os.makedirs(output_dir)
 
     round_result: dict[str, Any] = {
         "success": False,
@@ -1007,11 +1040,11 @@ def _run_one_round(
     }
 
     # 1. Call LLM to regenerate test files
-    print_step(instance_id, 1, f"Calling ClaudeOpus4_6 for test repair (round {round_num})...")
+    print_step(instance_id, 1, f"Calling {_MODEL_NAME} for test repair (round {round_num})...")
     system_prompt = POST_FIX_SYSTEM_PROMPT.format(repo_env_guidance=repo_env_guidance)
     user_prompt = POST_FIX_USER_PROMPT.format(**ctx)
 
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
@@ -1055,7 +1088,7 @@ def _run_one_round(
         test_file_contents=test_contents_str,
         repo_env_guidance=repo_env_guidance,
     )
-    eval_messages = [
+    eval_messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": eval_system},
         {"role": "user", "content": eval_user},
     ]
@@ -1294,6 +1327,16 @@ def post_fix_instance(
 
 
 # ---------------------------------------------------------------------------
+# Parallel worker
+# ---------------------------------------------------------------------------
+
+def _fix_one(args: tuple) -> dict[str, Any]:
+    setup_dir, inst_data, skip_docker, max_rounds = args
+    client = create_model()  # each worker gets its own client
+    return post_fix_instance(setup_dir, inst_data, client, skip_docker=skip_docker, max_rounds=max_rounds)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1325,6 +1368,10 @@ def main():
         "--temperature", type=float, default=0.2,
         help="LLM temperature (default: 0.2)",
     )
+    parser.add_argument(
+        "--workers", type=int, default=8,
+        help="Number of parallel instances to process (default: 8)",
+    )
     args = parser.parse_args()
 
     print_header("SWE-Factory Post-Fix Pipeline")
@@ -1350,36 +1397,48 @@ def main():
         color = Colors.RED if cls == "FAIL2FAIL" else Colors.YELLOW
         print(f"    {color}{cls}{Colors.RESET}: {count}")
 
-    print(f"\n  Initializing ClaudeOpus4_6 model...")
-    model = create_model()
-    print_success("Model ready")
-
     # Filter to instances in JSONL
     work_items = []
-    for instance_id, classification in failed:
+    for instance_id, _ in failed:
         if instance_id not in instances_map:
             print_warn(f"Skipping {instance_id}: not in instances JSONL")
             continue
         work_items.append(instances_map[instance_id])
 
     print(f"\n  Processing {Colors.BOLD}{len(work_items)}{Colors.RESET} instances "
-          f"(max {args.max_rounds} rounds each, sequential)")
+          f"(max {args.max_rounds} rounds each, workers={args.workers})")
     if args.skip_docker:
         print(f"  {Colors.YELLOW}Docker F2P validation: SKIPPED{Colors.RESET}")
     print()
 
-    # Process instances sequentially
-    results: list[dict[str, Any]] = []
-    for i, inst_data in enumerate(work_items, 1):
-        iid = inst_data["instance_id"]
-        print(f"{Colors.BOLD}[{i}/{len(work_items)}] {iid}{Colors.RESET}")
-        r = post_fix_instance(
-            args.setup_dir, inst_data, model,
-            skip_docker=args.skip_docker,
-            max_rounds=args.max_rounds,
-        )
-        print()
-        results.append(r)
+    # Process instances in parallel — each worker creates its own LLM client
+    results: list[dict[str, Any] | None] = [None] * len(work_items)
+    done = 0
+    executor = ThreadPoolExecutor(max_workers=args.workers)
+    futures = {
+        executor.submit(_fix_one, (args.setup_dir, inst_data, args.skip_docker, args.max_rounds)): i
+        for i, inst_data in enumerate(work_items)
+    }
+    try:
+        for future in as_completed(futures):
+            i = futures[future]
+            try:
+                r = future.result()
+                results[i] = r
+                done += 1
+                print(f"{Colors.BOLD}[{done}/{len(work_items)}] {r['instance_id']}: "
+                      f"{r.get('new_classification', 'N/A')}{Colors.RESET}")
+            except Exception as e:
+                done += 1
+                print_fail(f"[{done}/{len(work_items)}] worker error: {e}")
+    except KeyboardInterrupt:
+        print_warn("Interrupted — cancelling pending tasks...")
+        for f in futures:
+            f.cancel()
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    results = [r for r in results if r is not None]
 
     # =========================================================================
     # Summary
@@ -1401,6 +1460,8 @@ def main():
         degraded = []
 
         for r in results:
+            if r is None:
+                continue
             new_cls = r.get("new_classification")
             old_cls = r.get("old_classification")
             if new_cls:

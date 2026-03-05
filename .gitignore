@@ -179,3 +179,4 @@ scripts/report/*.md
 scripts/report/*.json
 run_instances/
 reports/
+inspection_output/
