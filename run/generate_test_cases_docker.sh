@@ -122,13 +122,22 @@ if max_instances > 0:
 else:
     selected = all_ids
 
-# Filter out already-completed instances (have status.json) so main.py
-# doesn't waste process slots loading/cloning repos that will be skipped.
-pending = [
-    iid for iid in selected
-    if not os.path.exists(os.path.join(out_dir, iid, "status.json"))
-]
-already_done = len(selected) - len(pending)
+# Filter out already-completed instances (is_finish=True in status.json).
+# Instances with is_finish=False will be re-run.
+pending = []
+already_done = 0
+for iid in selected:
+    status_path = os.path.join(out_dir, iid, "status.json")
+    if os.path.exists(status_path):
+        try:
+            with open(status_path) as sf:
+                status = json.load(sf)
+            if status.get("is_finish", False):
+                already_done += 1
+                continue
+        except (json.JSONDecodeError, OSError):
+            pass
+    pending.append(iid)
 
 print(f"  Total instances: {total}, selected: {len(selected)}, "
       f"already done: {already_done}, to run: {len(pending)}")

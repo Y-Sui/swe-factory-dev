@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
 ARG GITHUB_TOKEN
 RUN git clone https://${GITHUB_TOKEN}@github.com/MiroMindAI/sd-torchtune.git /testbed
 WORKDIR /testbed
+RUN git fetch origin +refs/pull/*/head:refs/pull/*/head
 
 # Install PyTorch CPU-only (no CUDA needed for unit tests)
 # torch 2.9.1 matches torchao 0.15.0's ABI (torchao 0.15 was built against 2.9.1)

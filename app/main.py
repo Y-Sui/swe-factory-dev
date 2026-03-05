@@ -683,8 +683,18 @@ def run_raw_task(
     
     status_file = pjoin(task_output_dir, "status.json")
     if os.path.exists(status_file):
-        log.log_and_always_print(f"Status file already exists for task {task_id}, skipping execution")
-        return True
+        try:
+            with open(status_file, "r") as sf:
+                status_data = json.load(sf)
+            if status_data.get("is_finish", False):
+                log.log_and_always_print(f"Task {task_id} already finished, skipping")
+                return True
+            else:
+                log.log_and_always_print(f"Task {task_id} has is_finish=False, clearing and re-running")
+                shutil.rmtree(task_output_dir)
+        except Exception as e:
+            log.log_and_always_print(f"Error reading status for {task_id}: {e}, clearing and re-running")
+            shutil.rmtree(task_output_dir)
     elif os.path.exists(task_output_dir):
         # If directory exists but no status.json, clean it up
         try:

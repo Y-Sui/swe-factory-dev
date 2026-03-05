@@ -347,21 +347,34 @@ _REPO_ENV_CONFIG: dict[str, tuple[str, str, str]] = {
         "swe-factory/miroflow:base",
         "Dockerfile.miroflow",
         """\
+## IMPORTANT: Repository Structure Change
+This repo changed from a **monorepo** layout to a **flat** layout over time.
+- **Newer commits** (flat): `pyproject.toml` exists at `/testbed/` root. Use `WORKDIR /testbed`.
+- **Older commits** (monorepo): NO root `pyproject.toml`. Packages are under `libs/miroflow/`, `apps/` etc. Use `WORKDIR /testbed/libs/miroflow`.
+
+After `git checkout`, you MUST check which layout applies and set WORKDIR accordingly.
+
 ## What the instance-layer Dockerfile MUST do (and nothing else)
 ```dockerfile
 FROM swe-factory/miroflow:base
 WORKDIR /testbed
 RUN git checkout <commit> && git clean -fd
-RUN uv sync                              # re-syncs if deps changed at this commit
+# Handle monorepo vs flat layout — older commits have no root pyproject.toml
+RUN if [ -f /testbed/pyproject.toml ]; then \
+      cd /testbed && uv sync; \
+    else \
+      cd /testbed/libs/miroflow && uv sync; \
+    fi
 RUN uv pip install pytest pytest-asyncio # ensure test deps present
 ```
 Do NOT run `uv venv` — `.venv` already exists. Do NOT git clone again.
 Do NOT add `ENV PATH=...` — call pytest via `.venv/bin/pytest` (see eval.sh pattern).
 
 ## Project layout & import paths
-- pyproject.toml: `[tool.hatch.build.targets.wheel] packages = ["src"]`
-- The editable install adds the **repo root** (`/testbed`) to sys.path, not `src/` itself.
-- Therefore `src/` is a visible sub-package directory at the repo root.
+- **Flat layout** (newer commits): `pyproject.toml` at root, `[tool.hatch.build.targets.wheel] packages = ["src"]`
+- **Monorepo layout** (older commits): `libs/miroflow/pyproject.toml`, similar hatch config
+- The editable install adds the project root to sys.path, not `src/` itself.
+- Therefore `src/` is a visible sub-package directory.
 - CORRECT imports: `from src.core.foo import Bar`, `from src.llm.client import X`, `from src.utils.helper import Y`
 - WRONG imports: `from core.foo import Bar`, `from miroflow.core.foo import Bar`
 

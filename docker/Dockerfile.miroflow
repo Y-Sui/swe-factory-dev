@@ -10,6 +10,7 @@ ENV PATH="/root/.local/bin:$PATH"
 
 RUN git clone https://github.com/MiroMindAI/miroflow.git /testbed
 WORKDIR /testbed
+RUN git fetch origin +refs/pull/*/head:refs/pull/*/head
 
 RUN uv sync --frozen
 

@@ -9,6 +9,8 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
 
 RUN git clone https://github.com/MiroMindAI/MiroThinker.git /testbed
+WORKDIR /testbed
+RUN git fetch origin +refs/pull/*/head:refs/pull/*/head
 WORKDIR /testbed/apps/miroflow-agent
 
 # Install all deps including dev deps (for pytest)
