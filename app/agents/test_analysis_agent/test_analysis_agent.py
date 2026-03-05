@@ -61,6 +61,7 @@ class TestAnalysisAgent(Agent):
         self.f2p_classification: str | None = None
         self._cached_image_name: str | None = None   # image tag of last successfully built image
         self._cached_dockerfile: str | None = None   # dockerfile content used for that build
+        self.test_file_contents: dict[str, str] = {}  # actual test file source code from WriteTestAgent
 
     def init_msg_thread(self) -> None:
         """
@@ -72,6 +73,29 @@ class TestAnalysisAgent(Agent):
         self.add_user_message(self.repo_basic_info)
         self.add_user_message(f'The current dockerfile used to setup environemnt:\n{self.dockerfile}')
         self.add_user_message(f'The current eval script (omit test patch to decrease length) used to run tests:\n{self.eval_script_skeleton}')
+        # Inject problem statement and hints so the LLM can correlate test
+        # failures with the actual bug and give targeted guidance.
+        self.add_user_message(
+            f'Problem statement (the bug/feature this patch addresses):\n{self.task.problem_statement}'
+        )
+        hints = (self.task.hints_text or "").strip()
+        if hints:
+            self.add_user_message(f'Developer hints (issue comments about root cause):\n{hints}')
+        # Inject patch context so the LLM can understand what the gold patch changes
+        # (full function bodies + imports), enabling more accurate diagnosis of
+        # PASS2PASS / FAIL2FAIL and more actionable guidance for write_test_agent.
+        patch_context = getattr(self.task, "patch_context", "")
+        if patch_context:
+            self.add_user_message(
+                f'Code change context (full function bodies around the gold patch):\n{patch_context}'
+            )
+        # Inject actual test file source code so the LLM can diagnose assertion quality
+        if self.test_file_contents:
+            files_str = "\n\n".join(
+                f"### {path}\n```python\n{content}\n```"
+                for path, content in self.test_file_contents.items()
+            )
+            self.add_user_message(f'Generated test files (source code):\n{files_str}')
 
     def get_latest_test_analysis_output_dir(self):
         output_dir = f'{self.test_analysis_dir}_{self.analysis_count}'

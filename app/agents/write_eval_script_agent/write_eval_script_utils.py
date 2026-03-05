@@ -321,6 +321,16 @@ def _ensure_pytest_targets_generated_files(content: str, target_files: list[str]
     if not target_files:
         return content
 
+    # Detect workdir from `cd /testbed/...` and strip the sub-path prefix
+    # so target_files are relative to the script's actual cwd.
+    cd_match = re.search(r"^\s*cd\s+/testbed/(.+)$", content, re.MULTILINE)
+    if cd_match:
+        prefix = cd_match.group(1).strip().rstrip("/") + "/"
+        target_files = [
+            f[len(prefix):] if f.startswith(prefix) else f
+            for f in target_files
+        ]
+
     target_args = " ".join(f'"{p}"' for p in target_files)
     out_lines: list[str] = []
     in_heredoc: str | None = None

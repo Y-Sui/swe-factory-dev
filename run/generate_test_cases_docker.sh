@@ -1,22 +1,56 @@
 #!/bin/bash
-# Stage II: Generate Dockerfiles + eval scripts for MiroMindAI/MiroThinker and MiroMindAI/miroflow
+# Stage II: Generate Dockerfiles + eval scripts + test files for all MiroMind repos.
 #
-# Prerequisites:
-#   1. Run collect_miro_issues.sh first (Stage I)
-#   2. Fill in OPENROUTER_API_KEY and OPENAI_KEY in .env
+# Supports incremental runs: instances with an existing status.json in the
+# output directory are automatically skipped by main.py, so you can safely
+# re-run this script with a larger --max-instances (or 0 = all) and only
+# new instances will be processed.
 #
 # Usage:
-#   cd swe-factory && bash run/setup_miro_envs.sh
+#   bash run/generate_test_cases_docker.sh                   # default: first 50 instances per repo
+#   bash run/generate_test_cases_docker.sh --max-instances 80
+#   bash run/generate_test_cases_docker.sh --max-instances 0  # all instances
+#   bash run/generate_test_cases_docker.sh --repos MiroMindAI__miroflow MiroMindAI__sd-torchtune
 
 set -euo pipefail
 
+# ── Defaults (override via CLI flags) ────────────────────────────────────────
+MAX_INSTANCES=20      # 0 = all instances
+MODEL="openai/gpt-5.2"
+MODEL_SLUG="gpt-5.2"
+ROUND=5
+NUM_PROCS=15
+ALL_REPOS=(
+  "MiroMindAI__MiroThinker"
+  "MiroMindAI__miroflow"
+  "MiroMindAI__sd-torchtune"
+)
+REPOS=()  # populated below; empty = use ALL_REPOS
+
+# ── Parse CLI args ───────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --max-instances) MAX_INSTANCES="$2"; shift 2 ;;
+    --model)         MODEL="$2"; shift 2 ;;
+    --model-slug)    MODEL_SLUG="$2"; shift 2 ;;
+    --round)         ROUND="$2"; shift 2 ;;
+    --num-procs)     NUM_PROCS="$2"; shift 2 ;;
+    --repos)         shift; while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do REPOS+=("$1"); shift; done ;;
+    *) echo "Unknown flag: $1"; exit 1 ;;
+  esac
+done
+[[ ${#REPOS[@]} -eq 0 ]] && REPOS=("${ALL_REPOS[@]}")
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+SCRIPT_DIR="data_collection/collect"
+DATA_DIR="/data/yuansui/internal-swe-bench-data"
+SETUP_DIR="testbed"
+
 # Load env vars (OPENAI_KEY, OPENAI_API_BASE_URL, GITHUB_TOKEN, etc.)
 set -a && source .env && set +a
-
-# Ensure the app package is importable
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
-# Step 0: Build base images (skipped if already present locally)
+# ── Step 0: Build base images (skipped if already present) ───────────────────
 echo "=== Building base images ==="
 if ! docker image inspect swe-factory/miroflow:base &>/dev/null; then
   docker build -t swe-factory/miroflow:base -f docker/Dockerfile.miroflow .
@@ -29,27 +63,11 @@ if ! docker image inspect swe-factory/sd-torchtune:base &>/dev/null; then
     -t swe-factory/sd-torchtune:base -f docker/Dockerfile.sd-torchtune .
 fi
 
-SCRIPT_DIR="data_collection/collect"
-DATA_DIR="/data/yuansui/internal-swe-bench-data"
-SETUP_DIR="testbed"
-MODEL="anthropic/claude-opus-4.6"
-# MODEL="google/gemini-2.5-flash"
-ROUND=6
-NUM_PROCS=30
-
-DATE_TAG=$(date +%Y-%m-%d)
-
-REPOS=(
-  "MiroMindAI__MiroThinker"
-  "MiroMindAI__miroflow"
-  # "MiroMindAI__sd-torchtune"
-)
-
-# Step 1: Add version info to instances (modifies file in-place)
+# ── Step 1: Add version info to instances (one-time, in-place) ───────────────
 for REPO in "${REPOS[@]}"; do
-  INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
+  INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
   if [ -z "$INSTANCE_FILE" ]; then
-    echo "=== No instances_selected file found for $REPO, skipping ==="
+    echo "=== No instances_all file found for $REPO, skipping ==="
     continue
   fi
 
@@ -83,33 +101,88 @@ PY
     --in-place
 done
 
-# Step 2: Run the multi-agent env setup (Dockerfile + eval.sh generation)
-# Launch all repos in parallel to fully utilise NUM_PROCS across repos.
+# ── Step 2: Sample instances & generate task list files ──────────────────────
+# Output dir is fixed per model (no date suffix) so that status.json from
+# previous runs persists and completed instances are automatically skipped.
+for REPO in "${REPOS[@]}"; do
+  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
+  if [ -z "$TASKS_MAP" ]; then continue; fi
+
+  OUT_DIR="$DATA_DIR/$REPO/setup_output_${MODEL_SLUG}"
+  TASK_LIST="$OUT_DIR/task_list.txt"
+  mkdir -p "$OUT_DIR" "$OUT_DIR/results"
+
+  # Sample up to MAX_INSTANCES (0 = all), skipping already-completed ones in
+  # the task list generation so the process slots go to new work.
+  TASKS_MAP="$TASKS_MAP" TASK_LIST="$TASK_LIST" MAX_INSTANCES="$MAX_INSTANCES" OUT_DIR="$OUT_DIR" \
+  python3 - <<'PY'
+import json, os
+
+tasks_map = os.environ["TASKS_MAP"]
+task_list_path = os.environ["TASK_LIST"]
+max_instances = int(os.environ["MAX_INSTANCES"])
+out_dir = os.environ["OUT_DIR"]
+
+# Read all instance IDs from the JSONL.
+all_ids = []
+with open(tasks_map, "r", encoding="utf-8") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        if "instance_id" in obj:
+            all_ids.append(obj["instance_id"])
+
+total = len(all_ids)
+
+# Apply sampling limit (0 = no limit).
+if max_instances > 0:
+    selected = all_ids[:max_instances]
+else:
+    selected = all_ids
+
+# Count how many are already completed (have status.json).
+already_done = sum(
+    1 for iid in selected
+    if os.path.exists(os.path.join(out_dir, iid, "status.json"))
+)
+new_count = len(selected) - already_done
+
+print(f"  Total instances: {total}, selected: {len(selected)}, "
+      f"already done: {already_done}, to run: {new_count}")
+
+with open(task_list_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(selected))
+PY
+done
+
+# ── Step 3: Run the multi-agent pipeline (parallel across repos) ─────────────
 PIDS=()
 for REPO in "${REPOS[@]}"; do
-  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_selected_*.jsonl 2>/dev/null | head -1)
-  if [ -z "$TASKS_MAP" ]; then
-    echo "=== No instances_selected file found for $REPO, skipping ==="
-    continue
-  fi
-  OUT_DIR="$DATA_DIR/$REPO/setup_output_${DATE_TAG}"
-  RESULT_DIR="$DATA_DIR/$REPO/setup_output_${DATE_TAG}/results"
-  mkdir -p "$OUT_DIR" "$RESULT_DIR"
+  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
+  if [ -z "$TASKS_MAP" ]; then continue; fi
 
-  echo "=== Running Stage II for $REPO with $MODEL ==="
+  OUT_DIR="$DATA_DIR/$REPO/setup_output_${MODEL_SLUG}"
+  RESULT_DIR="$OUT_DIR/results"
+  TASK_LIST="$OUT_DIR/task_list.txt"
+
+  echo "=== Running Stage II for $REPO | model=$MODEL | max=$MAX_INSTANCES | rounds=$ROUND ==="
   python3 app/main.py swe-bench \
     --model "$MODEL" \
     --tasks-map "$TASKS_MAP" \
+    --task-list-file "$TASK_LIST" \
     --num-processes "$NUM_PROCS" \
     --model-temperature 0.2 \
     --conv-round-limit "$ROUND" \
     --output-dir "$OUT_DIR" \
     --setup-dir "$SETUP_DIR" \
-    --results-path "$RESULT_DIR" &
+    --results-path "$RESULT_DIR" \
+    --no-print &
   PIDS+=($!)
 done
 
-# Wait for all repos and fail if any errored
+# Wait for all repos and fail if any errored.
 FAIL=0
 for PID in "${PIDS[@]}"; do
   wait "$PID" || FAIL=1

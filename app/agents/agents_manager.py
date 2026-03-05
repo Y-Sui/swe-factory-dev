@@ -9,7 +9,12 @@ from app.agents.context_retrieval_agent import ContextRetrievalAgent
 from app.agents.write_test_agent import WriteTestAgent
 from app.agents.write_eval_script_agent import WriteEvalScriptAgent
 from app.log import setup_logger, close_logger
-from swe_factory_utils import parse_test_files_from_patch
+from swe_factory_utils import (
+    parse_test_files_from_patch,
+    parse_per_test_results,
+    classify_per_test_f2p,
+    filter_test_file_by_names,
+)
 import os
 import docker
 from datetime import datetime
@@ -50,7 +55,8 @@ class AgentsManager:
             task.base_image = get_base_image_for_repo(task.repo_name)
 
         self.test_files = self.get_test_files()
-        self.repo_basic_info = self.get_repository_basic_info()
+        self.repo_basic_info = self.get_repository_basic_info(include_env_template=True)
+        self.repo_basic_info_slim = self.get_repository_basic_info(include_env_template=False)
 
         self.agents_dict = {
             "write_docker_agent": WriteDockerfileAgent(task, output_dir, self.repo_basic_info),
@@ -65,7 +71,7 @@ class AgentsManager:
             not (self.task.test_patch or "").strip() or len(self.test_files) < 3
         )
         if self.needs_test_generation:
-            self.agents_dict["write_test_agent"] = WriteTestAgent(task, output_dir, self.repo_basic_info)
+            self.agents_dict["write_test_agent"] = WriteTestAgent(task, output_dir, self.repo_basic_info_slim)
             self.set_agent_status("write_test_agent", False)
 
         self.agents_dict["test_analysis_agent"].disable_run_test = disable_run_test
@@ -100,81 +106,7 @@ class AgentsManager:
     def get_test_files(self) -> list[str]:
         return parse_test_files_from_patch(self.task.test_patch or "")
 
-    def _get_import_examples_for_patch(self) -> str:
-        """Scan the local repo clone for how existing code imports the modules modified by the patch.
-
-        Returns a formatted string to inject into WriteTestAgent's context, or "" if nothing found.
-        """
-        import subprocess
-
-        patch = self.task.patch or ""
-        repo_path = self.task.project_path
-
-        # Extract non-test source files modified by the patch
-        modified_src_files: list[str] = []
-        for line in patch.split("\n"):
-            if not line.startswith("diff --git "):
-                continue
-            parts = line.split()
-            if len(parts) < 4:
-                continue
-            path = parts[3][2:]  # strip "b/" prefix
-            if any(seg in path for seg in ("test_", "_test.", "/tests/", "/test/")):
-                continue
-            if path.endswith(".py"):
-                modified_src_files.append(path)
-
-        if not modified_src_files:
-            return ""
-
-        import_examples: list[str] = []
-        seen_stmts: set[str] = set()
-        for src_file in modified_src_files[:5]:
-            module_base = os.path.basename(src_file).replace(".py", "")
-            if not module_base:
-                continue
-            # Search for both "import <module>" and "from ... import ... <module>" patterns
-            for grep_pattern in [f"import {module_base}", f"from .* import.*{module_base}"]:
-                try:
-                    result = subprocess.run(
-                        ["grep", "-r", "--include=*.py", "-n", "-E", grep_pattern, repo_path],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    for raw in result.stdout.strip().split("\n"):
-                        if not raw or ".venv" in raw or "site-packages" in raw:
-                            continue
-                        # raw format: "/path/to/file.py:lineno:import statement"
-                        parts_raw = raw.split(":", 2)
-                        if len(parts_raw) < 3:
-                            continue
-                        file_path_raw, _, stmt = parts_raw
-                        stmt = stmt.strip()
-                        if not stmt or stmt in seen_stmts:
-                            continue
-                        seen_stmts.add(stmt)
-                        rel = os.path.relpath(file_path_raw, repo_path)
-                        import_examples.append(f"  {stmt}  # from {rel}")
-                        if len(import_examples) >= 8:
-                            break
-                except Exception:
-                    pass
-                if len(import_examples) >= 8:
-                    break
-            if len(import_examples) >= 8:
-                break
-
-        if not import_examples:
-            return ""
-
-        return (
-            "## Import examples from existing code\n"
-            "These are actual import lines found in the repo for the modules modified by the patch.\n"
-            "Use this EXACT import style in your tests — do NOT guess:\n"
-            + "\n".join(import_examples)
-            + "\n"
-        )
-
-    def get_repository_basic_info(self) -> str:
+    def get_repository_basic_info(self, include_env_template: bool = True) -> str:
         base = (
             f"Target repository name: {self.task.repo_name}\n"
             f"Commit SHA: {self.task.commit}\n"
@@ -183,9 +115,10 @@ class AgentsManager:
             + "\n".join(self.test_files)
             + "\n"
         )
-        template = get_repo_env_template(self.task.repo_name)
-        if template:
-            base += f"\n{template}"
+        if include_env_template:
+            template = get_repo_env_template(self.task.repo_name)
+            if template:
+                base += f"\n{template}"
         return base
 
     def dump_cost(self):
@@ -243,6 +176,139 @@ class AgentsManager:
         )
         return any(k in lower for k in infra_keywords)
 
+    def _try_per_test_filtering(self) -> bool:
+        """Post-process FAIL2FAIL: keep only per-test FAIL2PASS + PASS2PASS tests.
+
+        Parses pytest -v output from the last test run to identify individual
+        test results.  If some tests achieved FAIL→PASS, filters out the
+        failing tests and rebuilds test_patch + eval.sh without re-running
+        Docker.  Returns True if filtering salvaged at least one FAIL2PASS
+        test, False otherwise.
+        """
+        from app.agents.write_test_agent.write_test_utils import build_patch_from_files
+        from app.agents.write_eval_script_agent.write_eval_script_utils import _generate_cat_heredoc_block
+
+        _ta: TestAnalysisAgent = self.agents_dict["test_analysis_agent"]  # type: ignore[assignment]
+        pre_output = _ta.get_latest_prev_test_log()
+        post_output = _ta.get_latest_test_log()
+        if not pre_output or not post_output:
+            return False
+
+        pre_results = parse_per_test_results(pre_output)
+        post_results = parse_per_test_results(post_output)
+        if not pre_results or not post_results:
+            return False
+
+        per_test = classify_per_test_f2p(pre_results, post_results)
+        if not per_test:
+            return False
+
+        f2p_tests = {tid for tid, cls in per_test.items() if cls == "FAIL2PASS"}
+        if not f2p_tests:
+            return False
+
+        # Collect test names to keep (FAIL2PASS + PASS2PASS), grouped by file
+        keep_by_file: dict[str, set[str]] = {}
+        for tid, cls in per_test.items():
+            if cls in ("FAIL2PASS", "PASS2PASS"):
+                # tid format: "tests/file.py::test_name" or "tests/file.py::Class::test_name"
+                parts = tid.split("::")
+                filepath = parts[0]
+                test_name = parts[-1]  # last component is the function name
+                keep_by_file.setdefault(filepath, set()).add(test_name)
+
+        # Filter test file contents
+        wt_agent: WriteTestAgent | None = self.agents_dict.get("write_test_agent")  # type: ignore[assignment]
+        if wt_agent is None:
+            return False
+        original_contents = wt_agent.get_generated_test_file_contents()
+        if not original_contents:
+            return False
+
+        filtered_contents: dict[str, str] = {}
+        for filepath, source in original_contents.items():
+            if filepath in keep_by_file:
+                filtered = filter_test_file_by_names(source, keep_by_file[filepath])
+                if filtered:
+                    filtered_contents[filepath] = filtered
+            else:
+                # File has no tests in per-test results (maybe never ran);
+                # keep it only if all its tests were PASS2PASS or unknown
+                drop_names = set()
+                for tid, cls in per_test.items():
+                    if tid.startswith(filepath + "::") and cls in ("FAIL2FAIL", "PASS2FAIL"):
+                        drop_names.add(tid.split("::")[-1])
+                if not drop_names:
+                    filtered_contents[filepath] = source
+                else:
+                    keep_names = set()
+                    for tid, cls in per_test.items():
+                        if tid.startswith(filepath + "::") and cls in ("FAIL2PASS", "PASS2PASS"):
+                            keep_names.add(tid.split("::")[-1])
+                    if keep_names:
+                        filtered = filter_test_file_by_names(source, keep_names)
+                        if filtered:
+                            filtered_contents[filepath] = filtered
+
+        if not filtered_contents:
+            return False
+
+        # Rebuild test_patch
+        filter_dir = os.path.join(self.output_dir, "per_test_filtered")
+        patch_str, file_list = build_patch_from_files(filtered_contents, filter_dir)
+        if not patch_str:
+            return False
+
+        # Rebuild eval.sh from skeleton pattern
+        _eval_agent: WriteEvalScriptAgent = self.agents_dict["write_eval_script_agent"]  # type: ignore[assignment]
+        heredoc_block = _generate_cat_heredoc_block(filtered_contents)
+
+        from swe_factory_utils import REPO_EVAL_CONFIG, DEFAULT_REPO_EVAL_CONFIG
+        repo_cfg = REPO_EVAL_CONFIG.get(self.task.repo_name, DEFAULT_REPO_EVAL_CONFIG)
+        test_files_str = " ".join(f'"{f}"' for f in filtered_contents.keys())
+        pytest_cmd = repo_cfg["pytest_cmd"].replace("{files}", test_files_str)
+
+        eval_lines = [
+            "#!/bin/bash",
+            "set -uxo pipefail",
+            f"cd {repo_cfg['workdir']}",
+            'export PYTEST_ADDOPTS="--override-ini=addopts="',
+            heredoc_block,
+            f"{pytest_cmd}",
+        ]
+        new_eval_script = "\n".join(eval_lines) + "\n"
+
+        # Update agent states
+        wt_agent.generated_test_file_contents = filtered_contents
+        _eval_agent.test_patch = patch_str
+        _eval_agent.test_files_content = filtered_contents
+
+        # Write filtered eval.sh to the eval agent's output dir so get_latest_eval_script works
+        eval_dir = _eval_agent.get_latest_write_output_dir()
+        os.makedirs(eval_dir, exist_ok=True)
+        with open(os.path.join(eval_dir, "eval.sh"), "w") as f:
+            f.write(new_eval_script)
+
+        # Update task info
+        self.task.task_info["test_patch"] = patch_str
+
+        # Build FAIL_TO_PASS / PASS_TO_PASS lists
+        fail_to_pass = sorted(tid for tid, cls in per_test.items() if cls == "FAIL2PASS")
+        pass_to_pass = sorted(tid for tid, cls in per_test.items() if cls == "PASS2PASS")
+        self.task.task_info["FAIL_TO_PASS"] = json.dumps(fail_to_pass)
+        self.task.task_info["PASS_TO_PASS"] = json.dumps(pass_to_pass)
+
+        # Mark success
+        _ta.f2p_classification = "FAIL2PASS"
+        self.workflow_finish_status = True
+
+        logger.info(
+            f"Per-test filtering: kept {len(f2p_tests)} FAIL2PASS + "
+            f"{sum(1 for c in per_test.values() if c == 'PASS2PASS')} PASS2PASS tests, "
+            f"dropped {sum(1 for c in per_test.values() if c in ('FAIL2FAIL', 'PASS2FAIL'))} tests."
+        )
+        return True
+
     def _try_build_dockerfile(self, dockerfile: str) -> str | None:
         """Attempt to build the Dockerfile. Returns error string on failure, None on success."""
         analysis_agent: TestAnalysisAgent = self.agents_dict["test_analysis_agent"]  # type: ignore[assignment]
@@ -288,12 +354,6 @@ class AgentsManager:
                     self.set_agent_status("context_retrieval_agent", True)
                     self.agents_dict["write_docker_agent"].add_user_message(collected_information)
                     self.agents_dict["write_eval_script_agent"].add_user_message(collected_information)
-                    if self.needs_test_generation:
-                        self.agents_dict["write_test_agent"].add_user_message(collected_information)
-                        import_examples = self._get_import_examples_for_patch()
-                        if import_examples:
-                            self.agents_dict["write_test_agent"].add_user_message(import_examples)
-
             # Step 2: Dockerfile generation + build validation
             # Inner self-reflection loop: generate → build → feed error back → repeat (at least 2 rounds).
             # Only advances to WriteTestAgent once Docker build succeeds.
@@ -363,6 +423,10 @@ class AgentsManager:
                 _analysis_agent.dockerfile = _docker_agent2.get_latest_dockerfile()
                 _analysis_agent.eval_script_skeleton = _eval_agent2.get_latest_eval_script_skeleton()
                 _analysis_agent.eval_script = _eval_agent2.get_latest_eval_script() or ""
+                # Pass test file source code so TestAnalysisAgent can diagnose assertion quality
+                if "write_test_agent" in self.agents_dict:
+                    _wt: WriteTestAgent = self.agents_dict["write_test_agent"]  # type: ignore[assignment]
+                    _analysis_agent.test_file_contents = _wt.get_generated_test_file_contents()
 
                 analysis, _, success = _analysis_agent.run_task()
                 self.dump_cost()
@@ -414,14 +478,32 @@ class AgentsManager:
                     if "write_test_agent" not in self.agents_dict:
                         self.needs_test_generation = True
                         self.agents_dict["write_test_agent"] = WriteTestAgent(
-                            self.task, self.output_dir, self.repo_basic_info
+                            self.task, self.output_dir, self.repo_basic_info_slim
                         )
                     if self.needs_test_generation:
                         self.set_agent_status("write_test_agent", False)
                         self.set_agent_status("write_eval_script_agent", False)
                         test_agent: WriteTestAgent = self.agents_dict["write_test_agent"]  # type: ignore[assignment]
+
+                        # Build richer context for retry: previous test code + pre-patch log
+                        prev_test_files = ""
+                        if hasattr(test_agent, "generated_test_file_contents") and test_agent.generated_test_file_contents:
+                            prev_test_files = "\n\n".join(
+                                f"### {path}\n```python\n{content}\n```"
+                                for path, content in test_agent.generated_test_file_contents.items()
+                            )
+
+                        prev_test_log = ""
+                        _ta: TestAnalysisAgent = self.agents_dict["test_analysis_agent"]  # type: ignore[assignment]
+                        raw_log = _ta.get_latest_prev_test_log()
+                        if raw_log:
+                            lines = raw_log.splitlines()[:100]
+                            prev_test_log = "\n".join(lines)
+
                         test_agent.pending_guidance = (test_agent.pending_guidance or "") + (
                             f"The generated tests need improvement:\n{guidance}\n\n"
+                            + (f"## Previous test files\n{prev_test_files}\n\n" if prev_test_files else "")
+                            + (f"## Pre-patch test output (first 100 lines)\n```\n{prev_test_log}\n```\n\n" if prev_test_log else "")
                         )
             if (
                 not self.workflow_finish_status
@@ -439,6 +521,12 @@ class AgentsManager:
 
         if exhausted_rounds and not self.workflow_finish_status:
             logger.info("Too many rounds. Exceeded iteration limit (including recovery rounds).")
+
+        # Per-test filtering: salvage FAIL2PASS tests from overall FAIL2FAIL
+        if not self.workflow_finish_status:
+            f2p = getattr(self.agents_dict.get("test_analysis_agent"), "f2p_classification", None)
+            if f2p == "FAIL2FAIL" and self._try_per_test_filtering():
+                logger.info("Per-test filtering salvaged FAIL2PASS tests from FAIL2FAIL run.")
 
         # Save final outputs
         _final_docker: WriteDockerfileAgent = self.agents_dict["write_docker_agent"]  # type: ignore[assignment]

@@ -42,6 +42,7 @@ class Task(ABC):
 class SweTask(Task):
     task_id: str
     problem_statement: str
+    hints_text: str
     repo_path: str
     repo_cache_path: str
     commit: str
@@ -51,6 +52,7 @@ class SweTask(Task):
     # install_cmd: str
     # test_cmd: str
     patch: str
+    patch_context: str
     test_patch: str
     # testcases_passing: list[str]
     # testcases_failing: list[str]

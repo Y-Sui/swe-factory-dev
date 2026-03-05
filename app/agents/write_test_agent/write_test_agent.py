@@ -1,7 +1,12 @@
+import subprocess
+
 from app.data_structures import MessageThread
 from app.agents.write_test_agent import write_test_utils
 from app.agents.agent import Agent
+from app.agents.context_retrieval_agent.context_retrieval_utils import RepoBrowseManager
 from app.task import SweTask
+from app.utils import parse_function_invocation
+from app.model import common
 import os
 from app.log import (
     print_acr,
@@ -22,7 +27,7 @@ class WriteTestAgent(Agent):
     Uses multi-round reflexion (self-critique + refinement) to improve test quality.
     Supports multiple languages via task.language field.
     """
-    api_functions: list[str] = []
+    api_functions: list[str] = ["read_file", "search_symbol"]
 
     def __init__(
         self,
@@ -43,6 +48,7 @@ class WriteTestAgent(Agent):
         # Select language-specific system prompt
         self._language = getattr(task, "language", "python") or "python"
         self.pending_guidance: str | None = None
+        self.repo_browse_manager = RepoBrowseManager(task.project_path)
         self.init_msg_thread()
 
     def init_msg_thread(self) -> None:
@@ -54,6 +60,98 @@ class WriteTestAgent(Agent):
 
     def get_latest_write_output_dir(self) -> str:
         return os.path.join(self.output_dir, f"write_test_agent_{self.run_count}")
+
+    def read_file(self, file_path: str) -> tuple[str, str, bool]:
+        """Read a source file from the repo. Path is relative to repo root."""
+        if os.path.isabs(file_path):
+            abs_path = file_path
+        else:
+            abs_path = os.path.join(self.task.project_path, file_path)
+        try:
+            content = self.repo_browse_manager.browse_file(abs_path)
+            return content, f"Read {file_path}", True
+        except (ValueError, FileNotFoundError) as e:
+            return str(e), str(e), False
+
+    def search_symbol(self, symbol_name: str) -> tuple[str, str, bool]:
+        """Search for a symbol across all Python files in the repo."""
+        try:
+            result = subprocess.run(
+                ["grep", "-rn", "--include=*.py", symbol_name, self.task.project_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            lines = result.stdout.strip().split("\n")
+            # Filter out venv/site-packages and limit to 20 matches
+            filtered = []
+            for line in lines:
+                if not line or ".venv" in line or "site-packages" in line:
+                    continue
+                # Make paths relative
+                rel_line = line.replace(self.task.project_path + "/", "", 1)
+                filtered.append(rel_line)
+                if len(filtered) >= 20:
+                    break
+            if not filtered:
+                return f"No matches found for '{symbol_name}'.", f"No matches for {symbol_name}", True
+            output = f"Search results for '{symbol_name}' ({len(filtered)} matches):\n" + "\n".join(filtered)
+            return output, f"Found {len(filtered)} matches", True
+        except Exception as e:
+            return f"Search failed: {e}", str(e), False
+
+    def _run_research_phase(self, print_callback=None) -> None:
+        """Run a research phase where the LLM explores the repo to find correct import paths."""
+        modified_files = write_test_utils.extract_modified_files_from_patch(self.task.patch or "")
+        if not modified_files:
+            logger.info("Research phase: no modified files found in patch, skipping.")
+            return
+
+        modified_files_str = "\n".join(f"- {f}" for f in modified_files)
+        research_prompt = write_test_utils.RESEARCH_PROMPT.format(modified_files=modified_files_str)
+        self.add_user_message(research_prompt)
+
+        max_rounds = 3
+        max_calls_per_round = 5
+
+        for round_num in range(max_rounds):
+            try:
+                res_text, *_ = common.SELECTED_MODEL.call(self.msg_thread.to_msg())
+            except Exception as e:
+                logger.error(f"Research phase LLM call failed in round {round_num + 1}: {e}")
+                break
+            self.msg_thread.add_model(res_text, [])
+
+            tool_calls, is_done = write_test_utils.parse_research_response(res_text)
+            if is_done or not tool_calls:
+                logger.info(f"Research phase completed after {round_num + 1} round(s).")
+                break
+
+            # Execute tool calls
+            results = []
+            for call_str in tool_calls[:max_calls_per_round]:
+                try:
+                    func_name, args = parse_function_invocation(call_str)
+                except ValueError as e:
+                    results.append(f"Error parsing '{call_str}': {e}")
+                    continue
+
+                if func_name == "read_file" and args:
+                    output, _, _ = self.read_file(args[0])
+                    results.append(f"## read_file('{args[0]}')\n{output}")
+                elif func_name == "search_symbol" and args:
+                    output, _, _ = self.search_symbol(args[0])
+                    results.append(f"## search_symbol('{args[0]}')\n{output}")
+                else:
+                    results.append(f"Unknown tool call: {call_str}")
+
+            tool_results = "\n\n".join(results)
+            self.add_user_message(f"{tool_results}\n\n{write_test_utils.RESEARCH_CONTINUE_PROMPT}")
+            print_acr(
+                f"Research round {round_num + 1}: executed {len(results)} tool call(s)",
+                "research phase",
+                print_callback=print_callback,
+            )
+
+        logger.info("Research phase finished.")
 
     def run_task(
         self,
@@ -72,24 +170,33 @@ class WriteTestAgent(Agent):
                 self.pending_guidance = None
         print_banner(f"Task {self.task.task_id} Iteration ROUND {self.iteration_num}: Test Generation")
 
+        # Research phase: let the LLM explore the repo to discover correct import paths
+        self._run_research_phase(print_callback)
+
         self.run_count += 1
         curr_dir = self.get_latest_write_output_dir()
         os.makedirs(curr_dir, exist_ok=True)
         self.generated_test_file_contents = {}
 
-        # Summarize patch if too large
-        patch_content = write_test_utils.summarize_large_patch(self.task.patch)
+        # Use patch_context (richer context with full function bodies) instead of raw diff
+        patch_content = write_test_utils.summarize_large_patch(self.task.patch_context)
 
         # Include existing test_patch info if available (small but non-empty)
         existing_test_info = ""
         if (self.task.test_patch or "").strip():
             existing_test_info = write_test_utils.summarize_large_patch(self.task.test_patch)
 
+        # Combine problem_statement with hints_text for richer context
+        problem_stmt = self.task.problem_statement
+        hints = (self.task.hints_text or "").strip()
+        if hints:
+            problem_stmt = f"{problem_stmt}\n\n## Developer Hints\n{hints}"
+
         # Build user prompt
         user_prompt = write_test_utils.USER_PROMPT_WRITE_TEST.format(
             instance_id=self.task.task_id,
             base_commit=self.task.commit,
-            problem_statement=self.task.problem_statement,
+            problem_statement=problem_stmt,
             patch_content=patch_content,
             existing_tests=existing_test_info,
         )
@@ -109,9 +216,7 @@ class WriteTestAgent(Agent):
             logger.info(f"Starting reflexion loop ({self.max_reflexion_rounds} rounds) to refine tests.")
             refined_patch, refined_files, refined_file_contents = write_test_utils.refine_tests_with_reflexion(
                 msg_thread=self.msg_thread,
-                generated_patch=patch_str,
-                problem_statement=self.task.problem_statement,
-                code_patch=self.task.patch,
+                generated_test_patch=patch_str,
                 output_dir=curr_dir,
                 repo_root=self.task.project_path,
                 test_file_contents=test_file_contents,

@@ -707,12 +707,13 @@ The Docker environment is already built — the repo is at `/testbed` at the cor
   - New feature → call the new API; test naturally fails pre-patch (AttributeError/TypeError) and passes post-patch
 - **No over-mocking**: never mock the function/class the patch is fixing; only mock external I/O
 - **Concrete assertions**: `assert result == specific_value`, not `assert result` or `assert result is not None`
-- **Import paths**: use **exactly the import style shown in the "Import examples from existing code" section** (provided in the user message below). If no examples are provided, follow the import style in the repo environment template. Do NOT guess — wrong imports cause ModuleNotFoundError and FAIL2FAIL.
+- **Import paths**: During the research phase you read the actual source files. Use the EXACT import paths you found there — do NOT guess. If you saw `from ..utils.prompt_utils import X` in a file under `src/`, and the package is `src`, the test import is `from src.utils.prompt_utils import X`. If no research results are available, follow the import style in the repo environment template. Wrong imports cause ModuleNotFoundError and FAIL2FAIL.
 - **Nested/private symbols**: if a target function is nested inside another function or otherwise not importable, test it through the public callable that executes that logic, or use AST extraction to test the actual source. Strategies:
   1. **AST extraction** (preferred for simple nested functions): use `ast.get_source_segment()` + `textwrap.dedent()` + `exec()` to extract the nested function from the source file and test it directly with a lightweight stand-in for its dependencies.
   2. **End-to-end through public API**: call the enclosing public function with appropriate mocking of I/O and external dependencies to reach the nested code path.
   3. **Monkeypatch to capture**: if the nested function is passed as a callback, monkeypatch the receiver to capture and test the function.
 - **NEVER simulate patch logic inline**: Do NOT create mock/simulated versions of the patched function inside the test file and test those. Your test MUST exercise the ACTUAL source code from the repository. If your test would produce the same result whether or not the gold patch is applied to the repo, your test is useless — it will be classified PASS2PASS or FAIL2FAIL.
+- **Dependencies**: only import modules from the target repo, Python stdlib, and pytest. Do NOT introduce third-party packages that aren't already in the repo's dependencies.
 - **Relevance**: only test code mentioned in the patch
 - Apply any guidance from the test_analysis_agent precisely
 """ + _TEST_SHARED_FILE_FORMAT
@@ -852,8 +853,10 @@ TEST_USER_PROMPT = """Generate test files for the following pull request.
 {problem_statement}
 ```
 
-## Gold Patch
-```diff
+## Code Change Context
+The following shows the changed functions/methods with their full bodies, imports, and diff markers.
+Use this to understand the complete code structure around the changes.
+```
 {patch_content}
 ```
 
@@ -876,11 +879,7 @@ You MUST produce **3–4 F2P tests** and **3–4 P2P tests**.
 
 TEST_REFLEXION_CRITIQUE_PROMPT = """Review the following auto-generated tests for quality.
 
-### Problem Statement:
-{problem_statement}
-
-### Gold Patch:
-{patch_content}
+Refer to the problem statement and code change context provided earlier in the conversation.
 
 ### Generated Tests:
 {test_patch}
@@ -905,17 +904,13 @@ Otherwise provide specific, actionable fixes for each issue found.
 
 TEST_REFLEXION_REFINE_PROMPT = """Fix the tests based on the critique below. Address every issue raised.
 
+Refer to the problem statement and code change context provided earlier in the conversation.
+
 ### Critique:
 {critique}
 
 ### Current Tests:
 {test_patch}
-
-### Problem Statement:
-{problem_statement}
-
-### Gold Patch:
-{patch_content}
 
 For each F2P test you write, confirm:
 - Pre-patch: the assertion FAILS (buggy output or missing feature)

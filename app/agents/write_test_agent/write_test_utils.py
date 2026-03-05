@@ -30,6 +30,67 @@ REFLEXION_REFINE_PROMPT = TEST_REFLEXION_REFINE_PROMPT
 
 
 # ---------------------------------------------------------------------------
+# Research phase prompts and helpers
+# ---------------------------------------------------------------------------
+
+RESEARCH_PROMPT = """Before writing tests, research the codebase to find correct import paths.
+
+Available tools:
+- read_file(file_path): Read a source file (path relative to repo root, e.g. "src/core/parser.py"). Use this to read files modified by the patch and trace their import statements.
+- search_symbol(symbol_name): Search for where a symbol is defined or imported across the repo. Returns grep matches.
+
+The patch modifies these files:
+{modified_files}
+
+Your task:
+1. Read the source files modified by the patch to see their actual import statements
+2. For any symbol referenced in the patch that comes from another module, use search_symbol or read_file to find its real location
+3. Check __init__.py files to understand package structure and re-exports
+
+Respond with JSON (no markdown fencing):
+{{"tool_calls": ["read_file('path/to/file.py')", "search_symbol('SomeClass')"], "done": false}}
+
+When you have enough information to write tests with correct imports, respond with:
+{{"tool_calls": [], "done": true}}
+"""
+
+RESEARCH_CONTINUE_PROMPT = """Tool results are above. Continue researching if needed, or set done=true.
+Respond with JSON: {{"tool_calls": [...], "done": true/false}}"""
+
+
+def parse_research_response(text: str) -> tuple[list[str], bool]:
+    """Parse LLM research response. Returns (tool_call_strings, is_done)."""
+    from swe_factory_utils import extract_json_from_response
+
+    cleaned = extract_json_from_response(text)
+    try:
+        data = json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError):
+        # If JSON parsing fails, treat as done with no tool calls
+        return [], True
+
+    tool_calls = data.get("tool_calls", [])
+    done = data.get("done", False)
+    if not isinstance(tool_calls, list):
+        tool_calls = []
+    return tool_calls, bool(done)
+
+
+def extract_modified_files_from_patch(patch: str) -> list[str]:
+    """Extract file paths from patch diff headers (b/ side)."""
+    files = []
+    for line in patch.split("\n"):
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 4:
+                path = parts[3]
+                if path.startswith("b/"):
+                    path = path[2:]
+                files.append(path)
+    return files
+
+
+# ---------------------------------------------------------------------------
 # Patch summarizer
 # ---------------------------------------------------------------------------
 
@@ -220,9 +281,7 @@ def write_test_with_retries(
 
 def refine_tests_with_reflexion(
     msg_thread: MessageThread,
-    generated_patch: str,
-    problem_statement: str,
-    code_patch: str,
+    generated_test_patch: str,
     output_dir: str,
     repo_root: str | None = None,
     test_file_contents: dict[str, str] | None = None,
@@ -239,7 +298,7 @@ def refine_tests_with_reflexion(
 
     Returns (refined_patch, refined_test_files, refined_file_contents).
     """
-    current_patch = generated_patch
+    current_patch = generated_test_patch
     current_files = re.findall(r'\+\+\+ b/(.*)', current_patch)
     current_file_contents: dict[str, str] = test_file_contents or {}
 
@@ -248,8 +307,6 @@ def refine_tests_with_reflexion(
         os.makedirs(round_dir, exist_ok=True)
 
         critique_prompt = TEST_REFLEXION_CRITIQUE_PROMPT.format(
-            problem_statement=summarize_large_patch(problem_statement, 5000),
-            patch_content=summarize_large_patch(code_patch),
             test_patch=current_patch,
         )
         msg_thread.add_user(critique_prompt)
@@ -273,8 +330,6 @@ def refine_tests_with_reflexion(
         refine_prompt = TEST_REFLEXION_REFINE_PROMPT.format(
             critique=critique_text,
             test_patch=current_patch,
-            problem_statement=summarize_large_patch(problem_statement, 5000),
-            patch_content=summarize_large_patch(code_patch),
         )
         msg_thread.add_user(refine_prompt)
 

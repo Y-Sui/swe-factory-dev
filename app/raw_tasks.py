@@ -66,9 +66,17 @@ class RawSweTask(RawTask):
         task_info = self.task_info
         language = task_info.get('language') or 'python'
         client = self.client
+        # Build patch_context: join list items or fall back to raw patch
+        raw_patch_context = task_info.get("patch_context", [])
+        if isinstance(raw_patch_context, list) and raw_patch_context:
+            patch_context = "\n".join(raw_patch_context)
+        else:
+            patch_context = task_info["patch"]
+
         return SweTask(
             task_id=task_id,
             problem_statement=task_info["problem_statement"],
+            hints_text=task_info.get("hints_text", ""),
             repo_path=setup_info["repo_path"],
             repo_cache_path=setup_info["repo_cache_path"],
             # env_name=setup_info["env_name"],
@@ -80,6 +88,7 @@ class RawSweTask(RawTask):
             repo_name=task_info["repo"],
             # modifications to the test suite for this task instance,
             patch=task_info["patch"],
+            patch_context=patch_context,
             test_patch=task_info["test_patch"],
             # testcases_passing=task_info["PASS_TO_PASS"],
             # testcases_failing=task_info["FAIL_TO_PASS"],

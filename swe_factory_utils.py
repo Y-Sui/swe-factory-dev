@@ -8,6 +8,7 @@ here instead of maintaining its own copy.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 
@@ -177,3 +178,101 @@ def ensure_essentials_in_dockerfile(dockerfile: str) -> str:
             out.append(ESSENTIALS_RUN)
             inserted = True
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Per-test result parsing and filtering
+# ---------------------------------------------------------------------------
+
+_PER_TEST_RE = re.compile(r"^(\S+::\S+)\s+(PASSED|FAILED)\s", re.MULTILINE)
+
+
+def parse_per_test_results(pytest_output: str) -> dict[str, str]:
+    """Parse pytest -v output into {test_id: "PASSED"|"FAILED"}.
+
+    Matches lines like: tests/test_foo.py::test_bar PASSED [ 25%]
+    """
+    return {m.group(1): m.group(2) for m in _PER_TEST_RE.finditer(pytest_output)}
+
+
+def classify_per_test_f2p(
+    pre: dict[str, str], post: dict[str, str]
+) -> dict[str, str]:
+    """Cross-reference per-test results from pre-patch and post-patch runs.
+
+    Returns {test_id: "FAIL2PASS"|"PASS2PASS"|"FAIL2FAIL"|"PASS2FAIL"} for
+    test IDs present in both dicts.
+    """
+    result: dict[str, str] = {}
+    for tid in pre:
+        if tid not in post:
+            continue
+        pre_pass = pre[tid] == "PASSED"
+        post_pass = post[tid] == "PASSED"
+        if not pre_pass and post_pass:
+            result[tid] = "FAIL2PASS"
+        elif pre_pass and post_pass:
+            result[tid] = "PASS2PASS"
+        elif not pre_pass and not post_pass:
+            result[tid] = "FAIL2FAIL"
+        else:
+            result[tid] = "PASS2FAIL"
+    return result
+
+
+def filter_test_file_by_names(source: str, keep_names: set[str]) -> str:
+    """Remove top-level test functions not in *keep_names* from *source*.
+
+    Keeps all non-test code (imports, fixtures, constants, classes) intact.
+    A "test function" is a top-level ``def test_*`` or ``async def test_*``.
+    Returns the filtered source, or empty string if no test functions remain.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source  # can't parse → return as-is
+
+    lines = source.splitlines(keepends=True)
+
+    # Collect line ranges (0-indexed) of test functions to DROP
+    drop_ranges: list[tuple[int, int]] = []
+    for node in ast.iter_child_nodes(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test_"):
+            continue
+        if node.name in keep_names:
+            continue
+        # node.lineno is 1-indexed
+        start = node.lineno - 1
+        end = node.end_lineno  # end_lineno is 1-indexed inclusive → exclusive as index
+        if end is None:
+            end = start + 1
+        drop_ranges.append((start, end))
+
+    if not drop_ranges:
+        return source  # nothing to drop
+
+    # Build filtered output by skipping drop ranges
+    kept: list[str] = []
+    drop_set: set[int] = set()
+    for start, end in drop_ranges:
+        for i in range(start, end):
+            drop_set.add(i)
+
+    for i, line in enumerate(lines):
+        if i not in drop_set:
+            kept.append(line)
+
+    result = "".join(kept)
+
+    # Check if any test functions remain
+    try:
+        new_tree = ast.parse(result)
+    except SyntaxError:
+        return result
+    has_tests = any(
+        isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_")
+        for n in ast.iter_child_nodes(new_tree)
+    )
+    return result if has_tests else ""
