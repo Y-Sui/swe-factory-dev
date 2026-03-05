@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ── Defaults (override via CLI flags) ────────────────────────────────────────
-MAX_INSTANCES=5      # 0 = all instances
+MAX_INSTANCES=1      # 0 = all instances
 MODEL="openai/gpt-5.2"
 MODEL_SLUG="gpt-5.2"
 ROUND=3
@@ -53,24 +53,32 @@ SETUP_DIR="testbed"
 set -a && source .env && set +a
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
-# ── Step 0: Build base images (skipped if already present) ───────────────────
+# ── Step 0: Build base images in parallel (skipped if already present) ────────
 echo "=== Building base images ==="
+BUILD_PIDS=()
 if ! docker image inspect swe-factory/miroflow:base &>/dev/null; then
-  docker build -t swe-factory/miroflow:base -f docker/Dockerfile.miroflow .
+  docker build -t swe-factory/miroflow:base -f docker/Dockerfile.miroflow . &
+  BUILD_PIDS+=($!)
 fi
 if ! docker image inspect swe-factory/mirothinker:base &>/dev/null; then
-  docker build -t swe-factory/mirothinker:base -f docker/Dockerfile.mirothinker .
+  docker build -t swe-factory/mirothinker:base -f docker/Dockerfile.mirothinker . &
+  BUILD_PIDS+=($!)
 fi
 if ! docker image inspect swe-factory/sd-torchtune:base &>/dev/null; then
   docker build --build-arg GITHUB_TOKEN="${GITHUB_TOKEN}" \
-    -t swe-factory/sd-torchtune:base -f docker/Dockerfile.sd-torchtune .
+    -t swe-factory/sd-torchtune:base -f docker/Dockerfile.sd-torchtune . &
+  BUILD_PIDS+=($!)
 fi
+for PID in "${BUILD_PIDS[@]}"; do
+  wait "$PID" || { echo "Base image build failed (PID $PID)"; exit 1; }
+done
 
-# Helper: find the primary instances file (exclude _failures, _versions derivatives).
+# Helper: find the instances file. Prefer *_subset.jsonl, then plain instances_filter_*.jsonl.
 find_instances_file() {
-  ls "$DATA_DIR/$1"/instances_all_*.jsonl 2>/dev/null \
-    | grep -v -E '_(failures|versions)' \
-    | head -1
+  local subset
+  subset=$(ls "$DATA_DIR/$1"/instances_filter_*_subset.jsonl 2>/dev/null | head -1)
+  if [ -n "$subset" ]; then echo "$subset"; return; fi
+  ls "$DATA_DIR/$1"/instances_filter_*.jsonl 2>/dev/null | head -1
 }
 
 # ── Step 1: Sample instances & generate task list files ──────────────────────
@@ -114,18 +122,19 @@ if max_instances > 0:
 else:
     selected = all_ids
 
-# Count how many are already completed (have status.json).
-already_done = sum(
-    1 for iid in selected
-    if os.path.exists(os.path.join(out_dir, iid, "status.json"))
-)
-new_count = len(selected) - already_done
+# Filter out already-completed instances (have status.json) so main.py
+# doesn't waste process slots loading/cloning repos that will be skipped.
+pending = [
+    iid for iid in selected
+    if not os.path.exists(os.path.join(out_dir, iid, "status.json"))
+]
+already_done = len(selected) - len(pending)
 
 print(f"  Total instances: {total}, selected: {len(selected)}, "
-      f"already done: {already_done}, to run: {new_count}")
+      f"already done: {already_done}, to run: {len(pending)}")
 
 with open(task_list_path, "w", encoding="utf-8") as f:
-    f.write("\n".join(selected))
+    f.write("\n".join(pending))
 PY
 done
 

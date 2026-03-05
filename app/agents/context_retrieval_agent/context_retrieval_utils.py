@@ -1,16 +1,12 @@
 import os
 from typing import Dict, List, Any
 from loguru import logger
-import inspect
 import re
 from typing import Any
 from app.data_structures import MessageThread
 from app.model import common
-from app.utils import parse_function_invocation
 import json
-from app.post_process import ExtractStatus, is_valid_json
 import itertools
-from swe_factory_utils import extract_json_from_response
 from app.prompts.prompts import (
     CONTEXT_RETRIEVAL_SYSTEM_PROMPT,
     CONTEXT_RETRIEVAL_USER_PROMPT,
@@ -285,146 +281,6 @@ class RepoBrowseManager:
 
 
 
-PROXY_PROMPT = """
-You are an agent whose job is to:
-
-1. **Extract API calls** from a context-retrieval analysis text.  
-2. **Decide whether to terminate** the context-retrieval process.  
-
----
-
-### Input
-The text you receive is **an analysis of the context retrieval process**.  
-
-The text will consist of two parts:
-1. **Do we need to collect more context?**  
-   - Identify if additional files, folders, or webpages should be browsed for environment setup details.
-   - Extract API calls from this section (leave empty if none are needed).
-
-2. **Should we terminate the context retrieval process?**  
-   - If all necessary information has been collected, set `"terminate": true`.  
-     - You should extract detailed collected information form analyssis of the context retrieval agent. This information will be used by other agent.
-   - Otherwise, set `"terminate": false` and provide all collected details.
-
-API List:
-
-- browse_folder(path: str, depth: str): Browse and return the folder structure for a given path in the repository.  The depth is a string representing a number of folder levels to include in the output such as ``1''. 
-- browse_file_for_environment_info(file_path: str, custom_query: str): Call an agent to browse a file such as README or CONTRIBUTING.md and extract environment setup and running tests information. Use the `custom_query` parameter to tell the agent any extra details it should pay special attention to (for example, 'pom.xml dependency versions').
-- search_files_by_keyword(keyword: str): Search for files in the repository whose names contain the given keyword.
-
-### **IMPORTANT RULES**:
-- **Extract all relevant API calls from the text**:
-  - If files like `requirements.txt`, `setup.cfg`, `setup.py` are mentioned, call `browse_file_for_environment_info()` on them.
-  - If a directory needs exploration, use `browse_folder()`, ensuring `depth` defaults to `"1"` if unspecified.
-- If the API call includes a path, the default format should use Linux-style with forward slashes (/).
-- Ensure all API calls are valid Python expressions.
-- browse_file_for_environment_info("path.to.file") should be written as browse_file_for_environment_info("path/to/file")
-- the browse_folder API call MUST include the depth parameter, defaulting to "1" if not provided.
-- You MUST ignore the argument placeholders in API calls. For example:
-    Invalid Example: browse_folder(path="src", depth=1) 
-    Valid Example: browse_folder("src",1)
-- Provide your answer in JSON structure like this:
-{
-    "API_calls": ["api_call_1(args)", "api_call_2(args)", ...],
-    "collected_information": <Content of collected information>.
-    "terminate": true/false
-}
-
-"""
-
-
-def proxy_apis_with_retries(text: str, retries=5) -> tuple[str | None, list[MessageThread]]:
-    msg_threads = []
-    for idx in range(1, retries + 1):
-        logger.debug(
-            "Trying to select search APIs in json. Try {} of {}.", idx, retries
-        )
-
-        res_text, new_thread = run_proxy(text)
-        msg_threads.append(new_thread)
-        res_text = extract_json_from_response(res_text)
-        res_text = res_text.lstrip('```json').rstrip('```')
-        logger.debug(res_text)
-        extract_status, data = is_valid_json(res_text)
-
-        if extract_status != ExtractStatus.IS_VALID_JSON:
-            logger.debug("Invalid json. Will retry.")
-            continue
-
-        valid, diagnosis = is_valid_response_proxy(data)
-        if not valid:
-            logger.debug(f"{diagnosis}. Will retry.")
-            continue
-
-        logger.debug("Extracted a valid json")
-        return res_text, msg_threads
-    return None, msg_threads
-
-
-def run_proxy(text: str) -> tuple[str, MessageThread]:
-    """
-    Run the agent to extract issue to json format.
-    """
-
-    msg_thread = MessageThread()
-    msg_thread.add_system(PROXY_PROMPT)
-    msg_thread.add_user(f'<analysis>\n{text}</analysis>')
-    try:
-        res_text, *_ = common.SELECTED_MODEL.call(
-            msg_thread.to_msg(), response_format="json_object"
-        )
-    except Exception as e:
-        logger.error(f"LLM call failed in run_proxy: {e}")
-        return None, msg_thread
-
-    msg_thread.add_model(res_text, [])  # no tools
-
-    return res_text, msg_thread
-
-
-def is_valid_response_proxy(data: Any) -> tuple[bool, str]:
-    if not isinstance(data, dict):
-        return False, "Json is not a dict"
-
-    terminate = data.get("terminate")
-    if terminate is None:
-        return False, "'terminate' parameter is missing"
-    if not isinstance(terminate, bool):
-        return False, "'terminate' parameter must be a boolean (true/false)"
-
-    if terminate:
-        # When terminating, validate collected_information
-        summary = data.get("collected_information")
-        if summary is None:
-            return False, "'collected_information' parameter is missing"
-        if not isinstance(summary, str):
-            return False, "'collected_information' parameter must be a str"
-    else:
-        # When not terminating, validate API_calls
-        api_calls = data.get("API_calls")
-        if api_calls is None:
-            return False, "'API_calls' parameter is missing"
-        if not isinstance(api_calls, list):
-            return False, "'API_calls' parameter must be a list"
-        for api_call in api_calls:
-            if not isinstance(api_call, str):
-                return False, "Every API call must be a string"
-
-            try:
-                func_name, func_args = parse_function_invocation(api_call)
-            except Exception:
-                return False, "Every API call must be of form api_call(arg1, ..., argn)"
-            function = getattr(RepoBrowseManager, func_name, None)
-            if function is None:
-                return False, f"the API call '{api_call}' calls a non-existent function"
-
-            arg_spec = inspect.getfullargspec(function)
-            arg_names = arg_spec.args[1:]  # first parameter is self
-
-            if len(func_args) != len(arg_names):
-                return False, f"the API call '{api_call}' has wrong number of arguments"
-
-    return True, "OK"
 
 
 BROWSE_CONTENT_PROMPT = """
@@ -507,7 +363,7 @@ def browse_file_run(content: str, custom_query: str) -> tuple[str, MessageThread
     msg_thread.add_user(f"Custom query from user:\n{custom_query}\n")
     try:
         res_text, *_ = common.SELECTED_MODEL.call(
-            msg_thread.to_msg()
+            msg_thread.to_msg(), max_tokens=2048
         )
     except Exception as e:
         logger.error(f"LLM call failed in browse_file_run: {e}")
@@ -530,3 +386,96 @@ def parse_analysis_tags(data: str) -> str | None:
 # SYSTEM_PROMPT and USER_PROMPT are aliased here for backwards compatibility.
 SYSTEM_PROMPT = CONTEXT_RETRIEVAL_SYSTEM_PROMPT
 USER_PROMPT = CONTEXT_RETRIEVAL_USER_PROMPT
+
+# ---------------------------------------------------------------------------
+# Direct JSON prompts — eliminate proxy LLM overhead
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT_DIRECT_JSON = """You are a context_retrieval_agent responsible for gathering precise and necessary information from the local repository to support environment setup and test execution.
+
+Sometimes, another agent (such as a test analysis agent) may explicitly request specific information to help fix issues like Dockerfile errors or evaluation script failures.
+
+Your primary goal is to:
+- If a specific request is provided by a calling agent, focus your retrieval narrowly on that request.
+- If no explicit request is given, perform a basic and limited exploration of the repository to collect general environment and test execution information.
+- Pay special attention to exact versions of dependencies, setup commands, test commands, and environment config.
+
+The repository has already been cloned locally. Be goal-driven and cost-efficient. If no tests or test configs exist, state that clearly and stop searching.
+
+IMPORTANT: You MUST respond with a JSON object (no markdown, no explanation outside the JSON). The JSON must have these fields:
+{
+    "API_calls": ["api_call_1(args)", "api_call_2(args)"],
+    "collected_information": "summary of all collected info so far",
+    "terminate": false
+}
+
+When you have enough information, set terminate=true and provide a detailed collected_information summary.
+When you need more info, set terminate=false and provide API_calls to execute.
+
+Available APIs:
+- browse_folder(path, depth): Browse folder structure. depth is a string like "1".
+- browse_file_for_environment_info(file_path, custom_query): Browse a file and extract environment info.
+- search_files_by_keyword(keyword): Search for files by name keyword.
+
+API call format rules:
+- All calls must be valid Python expressions: browse_folder("src", "1") NOT browse_folder(path="src", depth=1)
+- browse_folder MUST include depth parameter, default "1"
+- Use forward slashes for paths"""
+
+USER_PROMPT_DIRECT_JSON = (
+    "Analyze the repository and gather information needed to set up the environment and run tests. "
+    "Start by inspecting key files like README.md, pyproject.toml, setup.py, requirements.txt. "
+    "If you cannot find tests or test configs after a quick check, report that and stop. "
+    "Respond with JSON containing API_calls, collected_information, and terminate fields."
+)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic file parsing — skip LLM for well-known file formats
+# ---------------------------------------------------------------------------
+
+def deterministic_file_parse(file_path: str) -> str | None:
+    """Parse common config files deterministically, returning extracted info or None to fall back to LLM."""
+    basename = os.path.basename(file_path)
+    lower = basename.lower()
+
+    if not os.path.isfile(file_path):
+        return None
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read(50000)  # cap at 50KB
+    except Exception:
+        return None
+
+    # requirements*.txt — just return the content as-is
+    if lower.startswith('requirements') and lower.endswith('.txt'):
+        return f"[Dependencies from {basename}]\n{content}\n[/Dependencies from {basename}]"
+
+    # setup.cfg — return as-is
+    if lower == 'setup.cfg':
+        return f"[Setup config from {basename}]\n{content}\n[/Setup config from {basename}]"
+
+    # pyproject.toml — return as-is (contains build system, deps, tool configs)
+    if lower == 'pyproject.toml':
+        return f"[Project config from {basename}]\n{content}\n[/Project config from {basename}]"
+
+    # setup.py — return as-is
+    if lower == 'setup.py':
+        return f"[Setup script from {basename}]\n{content}\n[/Setup script from {basename}]"
+
+    # Makefile — return as-is
+    if lower == 'makefile':
+        return f"[Build commands from {basename}]\n{content}\n[/Build commands from {basename}]"
+
+    # .github/workflows/*.yml — return as-is (CI config)
+    if file_path.endswith('.yml') or file_path.endswith('.yaml'):
+        if '.github' in file_path or 'ci' in lower:
+            return f"[CI config from {basename}]\n{content}\n[/CI config from {basename}]"
+
+    # pytest.ini, tox.ini, conftest.py — return as-is
+    if lower in ('pytest.ini', 'tox.ini', 'conftest.py', '.flake8', 'mypy.ini'):
+        return f"[Test config from {basename}]\n{content}\n[/Test config from {basename}]"
+
+    # For other files (README.md, CONTRIBUTING.md, etc.), fall back to LLM
+    return None

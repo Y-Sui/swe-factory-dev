@@ -95,13 +95,17 @@ class Repo:
         self.api = GhApi(token=token)
         self.repo = self.call_api(self.api.repos.get, owner=owner, repo=name)
         self.language = language
-    def github_api(self,url, token, max_retries=5):
+        # Reuse HTTP connections across API calls
+        self._session = requests.Session()
+        if token:
+            self._session.headers["Authorization"] = f"token {token}"
+
+    def github_api(self, url, token, max_retries=5):
         retries = 0
-        headers = {'Authorization': f'token {token}'}
 
         while retries < max_retries:
             try:
-                response = requests.get(url, headers=headers)
+                response = self._session.get(url)
                 if response.status_code == 200:
                     return response
                 elif response.status_code == 404:
@@ -409,7 +413,7 @@ class Repo:
         )
         return pulls
 
-def extract_problem_statement_and_hints_with_official_github_api(pull: dict, repo: Repo) -> tuple[str, str]:
+def extract_problem_statement_and_hints_with_official_github_api(pull: dict, repo: Repo, commits: list = None) -> tuple[str, str]:
     """
     Extract problem statement from issues associated with a pull request
 
@@ -443,7 +447,7 @@ def extract_problem_statement_and_hints_with_official_github_api(pull: dict, rep
         body = issue['body'] if issue['body'] else ""
         text += f"{title}\n{body}\n"
         issue_number = issue['number']
-        hint_texts = _extract_hints_with_official_github_api(pull, repo, issue_number)
+        hint_texts = _extract_hints_with_official_github_api(pull, repo, issue_number, commits=commits)
         hint_text = "\n".join(hint_texts)
         all_hint_texts.append(hint_text)
     return text, "\n".join(all_hint_texts) if all_hint_texts else ""
@@ -523,7 +527,7 @@ def _fetch_pr_hints(pull: dict, repo: Repo) -> str:
     return "\n\n---\n\n".join(hints_parts).strip()
 
 
-def _extract_hints_with_official_github_api(pull: dict, repo: Repo, issue_number: int) -> list[str]:
+def _extract_hints_with_official_github_api(pull: dict, repo: Repo, issue_number: int, commits: list = None) -> list[str]:
     """
     Extract hints from comments associated with a pull request (before first commit)
 
@@ -531,22 +535,18 @@ def _extract_hints_with_official_github_api(pull: dict, repo: Repo, issue_number
         pull (dict): PR dictionary object from GitHub
         repo (Repo): Repo object
         issue_number (int): issue number
+        commits (list): pre-fetched commits list (avoids duplicate API call)
     Return:
         hints (list): list of hints
     """
-    # Get all commits in PR
-    # commits = repo.get_all_loop(
-    #     repo.api.pulls.list_commits, pull_number=pull["number"], quiet=True
-    # )'
-    # commits = list(commits)
+    # Use pre-fetched commits if available, otherwise fetch
+    if commits is None:
+        commit_url = f'https://api.github.com/repos/{repo.owner}/{repo.name}/pulls/{pull["number"]}/commits'
+        resp = repo.github_api(url=commit_url, token=repo.token)
+        if resp is None:
+            return []
+        commits = resp.json()
 
-    commit_url =  f'https://api.github.com/repos/{repo.owner}/{repo.name}/pulls/{pull["number"]}/commits'
-    commits = repo.github_api(url=commit_url, token=repo.token)
-    if commits == None:
-        return []
-    else:
-        commits =  commits.json()
-    
     if len(commits) == 0:
         # If there are no comments, return no hints
         return []
@@ -586,13 +586,14 @@ def _extract_hints_with_official_github_api(pull: dict, repo: Repo, issue_number
     return comments
 
 
-def extract_problem_statement_and_hints(pull: dict, repo: Repo) -> tuple[str, str]:
+def extract_problem_statement_and_hints(pull: dict, repo: Repo, commits: list = None) -> tuple[str, str]:
     """
     Extract problem statement from issues associated with a pull request
 
     Args:
         pull (dict): PR dictionary object from GitHub
         repo (Repo): Repo object
+        commits (list): pre-fetched commits list (avoids duplicate API call)
     Return:
         text (str): problem statement
         hints (str): hints
@@ -614,13 +615,13 @@ def extract_problem_statement_and_hints(pull: dict, repo: Repo) -> tuple[str, st
         body = issue.body if issue.body else ""
         text += f"{title}\n{body}\n"
         issue_number = issue.number
-        hint_texts = _extract_hints(pull, repo, issue_number)
+        hint_texts = _extract_hints(pull, repo, issue_number, commits=commits)
         hint_text = "\n".join(hint_texts)
         all_hint_texts.append(hint_text)
     return text, "\n".join(all_hint_texts) if all_hint_texts else ""
 
 
-def _extract_hints(pull: dict, repo: Repo, issue_number: int) -> list[str]:
+def _extract_hints(pull: dict, repo: Repo, issue_number: int, commits: list = None) -> list[str]:
     """
     Extract hints from comments associated with a pull request (before first commit)
 
@@ -628,19 +629,21 @@ def _extract_hints(pull: dict, repo: Repo, issue_number: int) -> list[str]:
         pull (dict): PR dictionary object from GitHub
         repo (Repo): Repo object
         issue_number (int): issue number
+        commits (list): pre-fetched commits list (avoids duplicate API call)
     Return:
         hints (list): list of hints
     """
-    # Get all commits in PR
-    commits = repo.get_all_loop(
-        repo.api.pulls.list_commits, pull_number=pull["number"], quiet=True
-    )
-    commits = list(commits)
+    # Use pre-fetched commits if available, otherwise fetch
+    if commits is None:
+        commits = list(repo.get_all_loop(
+            repo.api.pulls.list_commits, pull_number=pull["number"], quiet=True
+        ))
     if len(commits) == 0:
         # If there are no comments, return no hints
         return []
-    # Get time of first commit in PR
-    commit_time = commits[0].commit.author.date  # str
+    # Get time of first commit in PR (handle both ghapi objects and plain dicts)
+    first = commits[0]
+    commit_time = first['commit']['author']['date'] if isinstance(first, dict) else first.commit.author.date
     commit_time = time.mktime(time.strptime(commit_time, "%Y-%m-%dT%H:%M:%SZ"))
     # Get all comments in PR
     all_comments = repo.get_all_loop(
@@ -683,10 +686,6 @@ def get_with_retries(
     timeout: int = 5,
     extra_headers: dict = None,
 ) -> str:
-    if token and not check_token_validity(token):
-        logger.warning("Invalid GitHub token, aborting request.")
-        return ""
-
     session = requests.Session()
     headers = {"Authorization": f"token {token}"} if token else {}
     if extra_headers:

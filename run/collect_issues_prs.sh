@@ -49,6 +49,16 @@ mkdir -p "$DATA_DIR/MiroMindAI__miroflow"
 #   --mode omnigirl --language python --cutoff_date "$CUTOFF_DATE"
 
 
+# ── Step 2.5: Filter benchmark-worthy instances ────────────────────────────────
+echo "=== [MiroThinker] Step 2.5: Filtering benchmark-worthy instances ==="
+python3 "$SCRIPT_DIR/filter_benchmark_worthy.py" "$DATA_DIR/MiroMindAI__MiroThinker"
+
+echo "=== [miroflow] Step 2.5: Filtering benchmark-worthy instances ==="
+python3 "$SCRIPT_DIR/filter_benchmark_worthy.py" "$DATA_DIR/MiroMindAI__miroflow"
+
+echo "=== [sd-torchtune] Step 2.5: Filtering benchmark-worthy instances ==="
+python3 "$SCRIPT_DIR/filter_benchmark_worthy.py" "$DATA_DIR/MiroMindAI__sd-torchtune"
+
 # # ── Step 3: Add version info to instances (in-place) ─────────────────────────
 # export PYTHONPATH="$(cd "$(dirname "$0")/.."; pwd):${PYTHONPATH:-}"
 # SETUP_DIR="testbed"
@@ -103,14 +113,24 @@ mkdir -p "$DATA_DIR/MiroMindAI__miroflow"
 #   rm -f "$DATA_DIR/$REPO"/*_failures*.jsonl "$DATA_DIR/$REPO"/*_versions*.jsonl
 # done
 
-# ── Step 4: Refine problem statements (commented out for now) ────────────────
+# ── Step 4: Refine problem statements ─────────────────────────────────────────
 echo "=== [MiroThinker] Step 4: Refining problem statements ==="
 python3 "$SCRIPT_DIR/refine_problem_statements.py" "$DATA_DIR/MiroMindAI__MiroThinker"
 
 echo "=== [miroflow] Step 4: Refining problem statements ==="
 python3 "$SCRIPT_DIR/refine_problem_statements.py" "$DATA_DIR/MiroMindAI__miroflow"
 
-echo "=== [sd-torchtune] Step 4: Refining problem statements ==="
-python3 "$SCRIPT_DIR/refine_problem_statements.py" "$DATA_DIR/MiroMindAI__sd-torchtune"
+# echo "=== [sd-torchtune] Step 4: Refining problem statements ==="
+# python3 "$SCRIPT_DIR/refine_problem_statements.py" "$DATA_DIR/MiroMindAI__sd-torchtune"
+
+# ── Step 4.5: Quality check & auto-fix problem statements ────────────────────
+echo "=== [MiroThinker] Step 4.5: Quality-checking problem statements ==="
+python3 "$SCRIPT_DIR/filter_ps_quality.py" "$DATA_DIR/MiroMindAI__MiroThinker"
+
+echo "=== [miroflow] Step 4.5: Quality-checking problem statements ==="
+python3 "$SCRIPT_DIR/filter_ps_quality.py" "$DATA_DIR/MiroMindAI__miroflow"
+
+echo "=== [sd-torchtune] Step 4.5: Quality-checking problem statements ==="
+python3 "$SCRIPT_DIR/filter_ps_quality.py" "$DATA_DIR/MiroMindAI__sd-torchtune"
 
 echo "=== All repos processed. Output in $DATA_DIR ==="

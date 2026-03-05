@@ -60,7 +60,7 @@ def write_eval_script_with_retries(
         raw_script_file = pjoin(output_dir, f"agent_eval_script_raw_{i}")
 
         try:
-            res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg())
+            res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg(), max_tokens=2048)
         except Exception as e:
             logger.error(f"LLM call failed in eval script generation try {i}: {e}")
             continue

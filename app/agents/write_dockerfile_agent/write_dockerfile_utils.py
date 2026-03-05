@@ -85,7 +85,7 @@ def write_dockerfile_with_retries(
         raw_dockerfile_file = pjoin(output_dir, f"agent_dockerfile_raw_{i}")
 
         try:
-            res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg())
+            res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg(), max_tokens=1024)
         except Exception as e:
             logger.error(f"LLM call failed in dockerfile generation try {i}: {e}")
             continue

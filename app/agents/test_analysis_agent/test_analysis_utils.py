@@ -144,7 +144,7 @@ def run(msg_thread: MessageThread):
     msg_thread.add_user(ANALYZE_PROMPT)
     try:
         res_text, *_ = common.SELECTED_MODEL.call(
-            msg_thread.to_msg(), response_format="json_object"
+            msg_thread.to_msg(), response_format="json_object", max_tokens=2048
         )
     except Exception as e:
         logger.error(f"LLM call failed in test analysis: {e}")

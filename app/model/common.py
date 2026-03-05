@@ -127,6 +127,7 @@ class LiteLLMGeneric(Model):
         top_p=1,
         tools=None,
         response_format: Literal["text", "json_object"] = "text",
+        max_tokens: int | None = None,
         **kwargs,
     ):
         # FIXME: ignore tools field since we don't use tools now
@@ -135,11 +136,14 @@ class LiteLLMGeneric(Model):
             if response_format == "json_object":  # prefill
                 messages.append({"role": "assistant", "content": prefill_content})
 
+            if max_tokens is None:
+                max_tokens = int(os.getenv("ACR_TOKEN_LIMIT", 4096))
+
             response = litellm.completion(
                 model=self.name,
                 messages=messages,
                 temperature=MODEL_TEMP,
-                max_tokens=os.getenv("ACR_TOKEN_LIMIT", 1024),
+                max_tokens=max_tokens,
                 response_format=(
                     {"type": response_format} if "gpt" in self.name else None
                 ),

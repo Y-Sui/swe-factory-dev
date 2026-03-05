@@ -168,9 +168,9 @@ def create_instances_from_pr(repo: Repo, pull: dict, output_dir: str, mode: str 
     resolved_issues = pull.get("resolved_issues", [])
     if resolved_issues:
         if mode == 'swebench':
-            problem_statement, hints = extract_problem_statement_and_hints(pull, repo)
+            problem_statement, hints = extract_problem_statement_and_hints(pull, repo, commits=commits)
         else:
-            problem_statement, hints = extract_problem_statement_and_hints_with_official_github_api(pull, repo)
+            problem_statement, hints = extract_problem_statement_and_hints_with_official_github_api(pull, repo, commits=commits)
     else:
         problem_statement, hints = extract_problem_statement_from_pr(pull, repo)
 

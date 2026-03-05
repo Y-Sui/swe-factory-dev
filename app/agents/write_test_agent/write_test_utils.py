@@ -240,7 +240,7 @@ def write_test_with_retries(
         raw_output_file = pjoin(output_dir, f"agent_write_test_raw_{i}")
 
         try:
-            res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg())
+            res_text, *_ = common.SELECTED_MODEL.call(new_thread.to_msg(), max_tokens=8192)
         except Exception as e:
             logger.error(f"LLM call failed in test generation try {i}: {e}")
             continue
@@ -312,7 +312,7 @@ def refine_tests_with_reflexion(
         msg_thread.add_user(critique_prompt)
 
         try:
-            critique_text, *_ = common.SELECTED_MODEL.call(msg_thread.to_msg())
+            critique_text, *_ = common.SELECTED_MODEL.call(msg_thread.to_msg(), max_tokens=2048)
         except Exception as e:
             logger.error(f"LLM call failed in reflexion critique round {round_num}: {e}")
             break
@@ -334,7 +334,7 @@ def refine_tests_with_reflexion(
         msg_thread.add_user(refine_prompt)
 
         try:
-            refined_text, *_ = common.SELECTED_MODEL.call(msg_thread.to_msg())
+            refined_text, *_ = common.SELECTED_MODEL.call(msg_thread.to_msg(), max_tokens=8192)
         except Exception as e:
             logger.error(f"LLM call failed in reflexion refine round {round_num}: {e}")
             break

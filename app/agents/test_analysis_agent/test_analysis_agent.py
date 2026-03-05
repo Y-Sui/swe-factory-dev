@@ -56,7 +56,7 @@ class TestAnalysisAgent(Agent):
         self.eval_script_skeleton: str | None = None
         self.dockerfile: str | None = None
         self.eval_script: str | None = None
-        self.timeout = 3600
+        self.timeout = 300
         self.disable_run_test = False
         self.f2p_classification: str | None = None
         self._cached_image_name: str | None = None   # image tag of last successfully built image
@@ -323,7 +323,7 @@ class TestAnalysisAgent(Agent):
             forcerm=True,
             decode=True,
             platform="linux/x86_64",
-            nocache=True,
+            nocache=False,
             buildargs=buildargs or None,
         )
 
@@ -438,7 +438,63 @@ class TestAnalysisAgent(Agent):
 
         return tool_output, summary, success
 
-    def run_test(self, eval_script: str, image_name: str) -> (str, str, bool):
+    def _run_pre_patch_in_container(self, container, eval_file, prev_test_output_path, run_test_logger):
+        """Run tests WITHOUT gold patch in a container. Returns (pre_test_output, pre_exit_code)."""
+        run_test_logger.info("=== F2P Phase 1: Running tests WITHOUT gold patch ===")
+        copy_to_container(container, eval_file, Path("/eval.sh"))
+        pre_result = exec_run_with_timeout(container, "/bin/bash /eval.sh", timeout=self.timeout)
+        pre_test_output = pre_result.decode("utf-8")
+        with open(prev_test_output_path, "w") as f:
+            f.write(pre_test_output)
+        pre_exit_code = _extract_exit_code(pre_test_output)
+        run_test_logger.info(f"Pre-patch exit code: {pre_exit_code}")
+        return pre_test_output, pre_exit_code
+
+    def _run_post_patch_in_container(self, container, eval_file, patch, patch_file_path,
+                                      test_output_path, instance_id, run_test_logger):
+        """Run tests WITH gold patch in a container. Returns (test_output, post_exit_code)."""
+        run_test_logger.info("=== F2P Phase 2: Running tests WITH gold patch ===")
+        patch_file = Path(patch_file_path)
+        patch_file.write_text(patch or "")
+        copy_to_container(container, patch_file, Path("/tmp/patch.diff"))
+
+        val = container.exec_run("git apply -p1 -v /tmp/patch.diff", workdir="/testbed", user="root")
+        if val.exit_code != 0:
+            run_test_logger.info("Failed to apply patch with git apply, trying patch command...")
+            run_test_logger.error(f"git apply output:\n{val.output.decode('utf-8', errors='replace')}")
+            val = container.exec_run("patch --batch --fuzz=5 -p1 -i /tmp/patch.diff", workdir="/testbed", user="root")
+            if val.exit_code != 0:
+                raise EvaluationError(
+                    instance_id,
+                    f"Apply patch fail:\n{val.output.decode('utf-8')}. Check if you apply patch in incorrect directories.",
+                    run_test_logger,
+                )
+            else:
+                run_test_logger.info(f"Apply patch success (fallback):\n{val.output.decode('utf-8')}")
+        else:
+            run_test_logger.info(f"Apply patch success:\n{val.output.decode('utf-8', errors='replace')}")
+
+        git_diff_before = container.exec_run("git diff", workdir="/testbed").output.decode("utf-8").strip()
+        run_test_logger.info(f"Git diff before test:\n{git_diff_before}")
+
+        copy_to_container(container, eval_file, Path("/eval.sh"))
+        result = exec_run_with_timeout(container, "/bin/bash /eval.sh", timeout=self.timeout)
+        test_output = result.decode("utf-8")
+        with open(test_output_path, "w") as f:
+            f.write(test_output)
+
+        post_exit_code = _extract_exit_code(test_output)
+        run_test_logger.info(f"Post-patch exit code: {post_exit_code}")
+
+        git_diff_after = container.exec_run("git diff", workdir="/testbed").output.decode("utf-8").strip()
+        if git_diff_after != git_diff_before:
+            run_test_logger.info("Git diff changed after running eval script")
+
+        return test_output, post_exit_code
+
+    def run_test(self, eval_script: str, image_name: str) -> tuple[str, str, bool]:
+        import threading
+
         tool_output = ""
         summary = ""
         success = False
@@ -449,131 +505,77 @@ class TestAnalysisAgent(Agent):
         os.makedirs(cur_test_dir, exist_ok=True)
         run_test_logger = setup_logger(self.task_id, Path(f'{cur_test_dir}/run_test.log'))
         test_image_name = image_name
-        test_container_name = f"{self.task_id}-test{self.run_test_num}"
         instance_id = self.task_id
-        container = None
         test_output_path = f'{cur_test_dir}/test_output.txt'
         prev_test_output_path = f'{cur_test_dir}/test_output_prev_apply.txt'
         pre_exit_code = None
         post_exit_code = None
+
+        # Write eval script once
+        eval_file = Path(f"{cur_test_dir}/eval.sh")
+        eval_file.write_text(eval_script)
+
+        # Create two containers for parallel pre/post-patch runs
+        pre_container = None
+        post_container = None
+        pre_container_name = f"{self.task_id}-pre{self.run_test_num}"
+        post_container_name = f"{self.task_id}-post{self.run_test_num}"
+
         try:
-            container = build_container(self.client,test_image_name,test_container_name,instance_id,run_test_logger)
+            pre_container = build_container(self.client, test_image_name, pre_container_name, instance_id, run_test_logger)
+            post_container = build_container(self.client, test_image_name, post_container_name, instance_id, run_test_logger)
+            pre_container.start()
+            post_container.start()
+            run_test_logger.info(f"Both containers started for parallel F2P test")
+            tool_output += "Containers started for parallel pre/post-patch testing.\n"
 
-            container.start()
-            run_test_logger.info(f"Container for {instance_id} started: {container.id}")
-            tool_output += f"Container {container.id} started.\n"
-            summary += "Container started.\n"
+            # Shared result holders
+            pre_result = {"output": None, "exit_code": None, "error": None}
+            post_result = {"output": None, "exit_code": None, "error": None}
 
-            # === Phase 1: Pre-patch run (without gold patch) ===
-            eval_file = Path(f"{self.get_latest_test_analysis_output_dir()}/eval.sh")
-            try:
-                run_test_logger.info("=== F2P Phase 1: Running tests WITHOUT gold patch ===")
-                eval_file.write_text(eval_script)
-                copy_to_container(container, eval_file, Path("/eval.sh"))
-
-                pre_result = exec_run_with_timeout(container, "/bin/bash /eval.sh", timeout=self.timeout)
-                pre_test_output = pre_result.decode("utf-8")
-
-                with open(prev_test_output_path, "w") as f:
-                    f.write(pre_test_output)
-                run_test_logger.info(f"Pre-patch test output written to {prev_test_output_path}")
-
-                pre_exit_code = _extract_exit_code(pre_test_output)
-                run_test_logger.info(f"Pre-patch exit code: {pre_exit_code}")
-                tool_output += f"Pre-patch test run completed (exit code: {pre_exit_code}).\n"
-            except Exception as e:
-                run_test_logger.warning(f"Pre-patch test run failed: {e}. Continuing with post-patch run.")
-                tool_output += f"Pre-patch test run failed: {e}. Continuing.\n"
-
-            # === Reset container state for post-patch run ===
-            run_test_logger.info("Resetting container state for post-patch run...")
-            container.exec_run(
-                f"git reset --hard {self.task.commit}",
-                workdir="/testbed",
-                user="root",
-            )
-            container.exec_run(
-                get_clean_command_for_repo(self.task.repo_name),
-                workdir="/testbed",
-                user="root",
-            )
-            run_test_logger.info("Container state reset complete.")
-
-            # === Phase 2: Post-patch run (with gold patch) ===
-            run_test_logger.info("=== F2P Phase 2: Running tests WITH gold patch ===")
-            # Copy model prediction as patch file to container
-            patch_file = Path(f"{cur_test_dir}/patch.diff")
-            patch_file.write_text(patch or "")
-            run_test_logger.info(
-                f"Intermediate patch for {instance_id} written to {patch_file}, now applying to container..."
-            )
-            copy_to_container(container, patch_file, Path("/tmp/patch.diff"))
-
-
-            # Attempt to apply patch to container
-            val = container.exec_run(
-                "git apply -p1 -v /tmp/patch.diff",
-                workdir="/testbed",
-                user="root",
-            )
-            exit_code = val.exit_code
-            output = val.output.decode("utf-8", errors="replace")
-
-            if exit_code != 0:
-                run_test_logger.info("Failed to apply patch to container, trying again...")
-                run_test_logger.error(f"git apply returned exit_code={exit_code}. Output:\n{output}")
-                # try "patch --batch --fuzz=5 -p1 -i {patch_path}" to try again
-                val = container.exec_run(
-                    "patch --batch --fuzz=5 -p1 -i /tmp/patch.diff",
-                    workdir="/testbed",
-                    user="root",
-                )
-                if val.exit_code != 0:
-                    run_test_logger.info(f"Apply patch fail:\n{val.output.decode('utf-8')}")
-                    raise EvaluationError(
-                        instance_id,
-                        f"Apply patch fail:\n{val.output.decode('utf-8')}. Check if you apply patch in incorrect directories.",
-                        run_test_logger,
+            def run_pre():
+                try:
+                    _, code = self._run_pre_patch_in_container(
+                        pre_container, eval_file, prev_test_output_path, run_test_logger
                     )
-                else:
-                    run_test_logger.info(f"Apply patch success:\n{val.output.decode('utf-8')}")
+                    pre_result["exit_code"] = code
+                except Exception as e:
+                    pre_result["error"] = e
+
+            def run_post():
+                try:
+                    _, code = self._run_post_patch_in_container(
+                        post_container, eval_file, patch,
+                        f"{cur_test_dir}/patch.diff",
+                        test_output_path, instance_id, run_test_logger
+                    )
+                    post_result["exit_code"] = code
+                except Exception as e:
+                    post_result["error"] = e
+
+            pre_thread = threading.Thread(target=run_pre)
+            post_thread = threading.Thread(target=run_post)
+            pre_thread.start()
+            post_thread.start()
+            pre_thread.join(timeout=self.timeout + 60)
+            post_thread.join(timeout=self.timeout + 60)
+
+            # Collect results
+            if pre_result["error"]:
+                run_test_logger.warning(f"Pre-patch run failed: {pre_result['error']}")
+                tool_output += f"Pre-patch test run failed: {pre_result['error']}.\n"
             else:
-                run_test_logger.info(f"Apply patch success:\n{val.output.decode('utf-8')}")
+                pre_exit_code = pre_result["exit_code"]
+                tool_output += f"Pre-patch test run completed (exit code: {pre_exit_code}).\n"
+
+            if post_result["error"]:
+                raise post_result["error"]
+            post_exit_code = post_result["exit_code"]
+
             tool_output += "Patch applied successfully.\n"
-            summary += "Patch applied.\n"
-                    # Get git diff before running eval script
-            git_diff_output_before = (
-                container.exec_run("git diff", workdir="/testbed").output.decode("utf-8").strip()
-            )
-            run_test_logger.info(f"Git diff before:\n{git_diff_output_before}")
+            summary += "Parallel test execution completed.\n"
 
-            # Re-copy eval.sh (in case pre-patch run modified it)
-            copy_to_container(container, eval_file, Path("/eval.sh"))
-
-            # Run eval script, write output to logs
-            result = exec_run_with_timeout(container, "/bin/bash /eval.sh", timeout=self.timeout)
-            test_output = result.decode("utf-8")
-
-            with open(test_output_path, "w") as f:
-                f.write(test_output)
-            run_test_logger.info(f"Test output for {instance_id} written to {test_output_path}")
-
-            post_exit_code = _extract_exit_code(test_output)
-            run_test_logger.info(f"Post-patch exit code: {post_exit_code}")
-
-            # Get git diff after running eval script
-            git_diff_output_after = (
-                container.exec_run("git diff", workdir="/testbed").output.decode("utf-8").strip()
-            )
-
-            # Check if git diff changed after running eval script
-            run_test_logger.info(f"Git diff after:\n{git_diff_output_after}")
-            if git_diff_output_after != git_diff_output_before:
-                run_test_logger.info(f"Git diff changed after running eval script")
-                tool_output += "Note: Git diff changed after test execution.\n"
-                summary += "Git diff changed.\n"
-
-            # === F2P Classification ===
+            # F2P Classification
             self.f2p_classification = classify_f2p(pre_exit_code, post_exit_code)
             run_test_logger.info(f"F2P classification: {self.f2p_classification} (pre={pre_exit_code}, post={post_exit_code})")
             tool_output += f"F2P classification: {self.f2p_classification}\n"
@@ -606,10 +608,8 @@ class TestAnalysisAgent(Agent):
                 success = True
 
         finally:
-            # Always remove the container, but only remove the image when it
-            # won't be reused — i.e. when a new build would replace it next round.
-            # We keep the cached image alive so the next round can skip rebuilding.
-            cleanup_container(self.client, container, run_test_logger)
+            cleanup_container(self.client, pre_container, run_test_logger)
+            cleanup_container(self.client, post_container, run_test_logger)
 
             if test_image_name != self._cached_image_name:
                 remove_image(self.client, test_image_name, run_test_logger)

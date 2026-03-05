@@ -114,7 +114,7 @@ class WriteTestAgent(Agent):
 
         for round_num in range(max_rounds):
             try:
-                res_text, *_ = common.SELECTED_MODEL.call(self.msg_thread.to_msg())
+                res_text, *_ = common.SELECTED_MODEL.call(self.msg_thread.to_msg(), max_tokens=1024)
             except Exception as e:
                 logger.error(f"Research phase LLM call failed in round {round_num + 1}: {e}")
                 break
@@ -212,7 +212,8 @@ class WriteTestAgent(Agent):
         )
 
         # --- Phase 2: Reflexion loop to improve test quality ---
-        if success and patch_str and self.max_reflexion_rounds > 0:
+        # Skip reflexion on first iteration (no real test feedback yet)
+        if success and patch_str and self.max_reflexion_rounds > 0 and self.iteration_num > 0:
             logger.info(f"Starting reflexion loop ({self.max_reflexion_rounds} rounds) to refine tests.")
             refined_patch, refined_files, refined_file_contents = write_test_utils.refine_tests_with_reflexion(
                 msg_thread=self.msg_thread,

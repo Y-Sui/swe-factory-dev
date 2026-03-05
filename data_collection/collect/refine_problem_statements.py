@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "anthropic/claude-sonnet-4.5"
-MAX_TOKENS_PS = 256
+MAX_TOKENS_PS = 400
 MAX_TOKENS_HINTS = 512
 
 # ---------------------------------------------------------------------------
@@ -44,15 +44,22 @@ PROBLEM_STATEMENT_SYSTEM = (
     "You rewrite raw PR/commit descriptions into realistic GitHub issue descriptions, "
     "matching the style used in SWE-bench and SWE-bench-Pro benchmarks.\n\n"
     "A good problem statement reads like a real bug report or feature request filed by a user "
-    "who has encountered the problem but does NOT know the fix. It should:\n"
+    "who has encountered the problem but does NOT know the fix. It must:\n"
+    "- Use declarative statements only — NEVER use question marks or interrogative sentences\n"
     "- State the problem from the user's perspective (what they tried, what went wrong)\n"
     "- Include a short reproduction scenario or code snippet when possible\n"
     "- Show expected vs actual behavior for bugs\n"
     "- Describe the desired capability for feature requests\n"
     "- NEVER mention the fix, patch, implementation, or solution\n"
+    "- NEVER reference specific code changes, diffs, added/removed lines, or new values\n"
     "- NEVER reference PR numbers, commit SHAs, or that a fix exists\n"
+    "- Do NOT name specific variables, parameters, or constants that were introduced by the fix\n"
     "- Use natural developer language, not formal spec language\n"
-    "- Focus only on Python (.py) files; ignore non-Python changes"
+    "- Focus only on Python (.py) files; ignore non-Python changes\n\n"
+    "IMPORTANT: The code context may contain diff markers (+/-) showing what was changed. "
+    "These are provided ONLY to help you understand the bug or feature. You must NOT leak "
+    "any information about the fix into the problem statement — no new parameter names, "
+    "no new logic, no added constants. Describe only the observable problem or missing behavior."
 )
 
 PROBLEM_STATEMENT_USER = """## Raw PR/commit description
@@ -64,15 +71,19 @@ PROBLEM_STATEMENT_USER = """## Raw PR/commit description
 Rewrite the above into a GitHub issue that a developer would file BEFORE any fix exists.
 
 Format:
-<title line — a short summary of the bug or feature request>
+<title line — a short, declarative summary of the bug or feature request>
 
-<body — 60-120 words describing the problem. For bugs, include: what the user did, what happened, what they expected. For features, include: what capability is missing and a usage scenario. If possible, include a minimal code snippet showing the broken or missing behavior.>
+<body — 60-150 words describing the problem at a behavioral level. Use only declarative statements. For bugs: state what the user did, what happened, and what the expected behavior is. For features: state what capability is missing and describe a usage scenario. If possible, include a minimal code snippet showing the broken or missing behavior.>
 
 Rules:
-- Write as if you do NOT know the solution
+- Use ONLY declarative statements. No questions. No "?" anywhere in the output.
+- Write as if you do NOT know the solution and have never seen any patch or diff
+- Describe the OBSERVABLE problem or missing behavior, not internal implementation details
 - Do NOT say "should be changed to", "needs to be fixed by", or describe any implementation
+- Do NOT mention specific code changes, new parameters, renamed variables, or added constants from the diff
 - Do NOT reference any PR, commit, or that a patch exists
-- Keep it natural — this should read like a real GitHub issue
+- Keep it broad enough that multiple valid fixes could address the issue
+- Keep it natural — this should read like a real GitHub issue, written in statements not questions
 
 Return only the issue text (title + body), no extra commentary."""
 
@@ -80,7 +91,10 @@ HINTS_SYSTEM = (
     "You provide diagnostic hints that help a developer locate the root cause. "
     "You know the codebase well and can point to specific locations, but you "
     "do not give away the complete solution — only enough to guide investigation.\n"
-    "Focus only on Python (.py) files."
+    "Focus only on Python (.py) files.\n\n"
+    "IMPORTANT: The code context may contain diff markers showing the fix. "
+    "Do NOT reveal exact code changes, new variable names, or added parameters. "
+    "Only describe what is currently wrong or missing in the pre-patch code."
 )
 
 HINTS_USER = """## Problem description
@@ -90,11 +104,13 @@ HINTS_USER = """## Problem description
 {context_str}
 
 Write diagnostic hints (100-150 words) that help a developer find and fix this issue:
-- Name every specific file, class, and function involved
-- Describe what the code currently does at each location and why it's wrong
-- Point toward the fix direction without spelling out the complete solution
+- Name the specific file(s), class(es), and function(s) involved
+- Describe what the code currently does at each location and why it is wrong or incomplete
+- Point toward the fix direction without spelling out the exact code changes
   (e.g. "the validation in X.validate() doesn't account for Y" or
    "this function needs to propagate Z to its caller")
+- Do NOT reveal specific variable names, parameters, or constants that were ADDED by the fix
+- Use only declarative statements, no questions
 
 Return only the hints text, plain prose."""
 
@@ -175,9 +191,12 @@ def _refine_one(args: tuple) -> tuple[int, str, str]:
 # ---------------------------------------------------------------------------
 
 def main(output_dir: str, workers: int):
-    files = sorted(glob_mod.glob(os.path.join(output_dir, "instances_all_*.jsonl")))
+    subset_files = sorted(glob_mod.glob(os.path.join(output_dir, "instances_filter_*_subset.jsonl")))
+    filter_files = sorted(glob_mod.glob(os.path.join(output_dir, "instances_filter_*.jsonl")))
+    # Prefer subset files over full filter files
+    files = subset_files or [f for f in filter_files if "_subset" not in f]
     if not files:
-        logger.error(f"No instances_all_*.jsonl found in {output_dir}")
+        logger.error(f"No instances_filter_*.jsonl found in {output_dir}")
         sys.exit(1)
 
     jsonl_path = files[-1]
