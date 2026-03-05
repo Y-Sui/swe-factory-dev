@@ -11,6 +11,77 @@ from __future__ import annotations
 import ast
 import os
 import re
+import subprocess
+
+# ---------------------------------------------------------------------------
+# Fetch missing (dangling) commits
+# ---------------------------------------------------------------------------
+
+
+def fetch_missing_commits(
+    repo_dir: str,
+    commits: list[str] | set[str],
+    repo_url: str | None = None,
+) -> list[str]:
+    """Fetch commits not reachable in a local clone (e.g. from force-pushed PRs).
+
+    Args:
+        repo_dir: Path to the local git repository.
+        commits: Commit SHAs to ensure are present.
+        repo_url: If provided, update the remote origin URL first
+                  (useful when GITHUB_TOKEN has changed).
+
+    Returns:
+        List of SHAs that are still missing after fetching.
+    """
+    if not commits:
+        return []
+
+    if repo_url:
+        subprocess.run(
+            ["git", "remote", "set-url", "origin", repo_url],
+            cwd=repo_dir, capture_output=True, check=False,
+        )
+
+    # Find which SHAs are missing locally.
+    missing = []
+    for sha in commits:
+        r = subprocess.run(
+            ["git", "cat-file", "-t", sha],
+            cwd=repo_dir, capture_output=True, check=False,
+        )
+        if r.returncode != 0:
+            missing.append(sha)
+
+    if not missing:
+        return []
+
+    print(f"⏳ Fetching {len(missing)} missing commits in {os.path.basename(repo_dir)}...")
+    for sha in missing:
+        r = subprocess.run(
+            ["git", "fetch", "origin", sha],
+            cwd=repo_dir, capture_output=True, check=False,
+        )
+        if r.returncode != 0:
+            print(f"  ⚠️  Could not fetch {sha[:12]}")
+
+    # Check which are still missing.
+    still_missing = []
+    for sha in missing:
+        r = subprocess.run(
+            ["git", "cat-file", "-t", sha],
+            cwd=repo_dir, capture_output=True, check=False,
+        )
+        if r.returncode != 0:
+            still_missing.append(sha)
+
+    fetched = len(missing) - len(still_missing)
+    print(
+        f"  ✅ Fetched {fetched}/{len(missing)} commits"
+        + (f", {len(still_missing)} still missing" if still_missing else "")
+    )
+    return still_missing
+
 
 # ---------------------------------------------------------------------------
 # Exit-code extraction

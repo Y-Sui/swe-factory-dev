@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "google/gemini-2.5-flash"
+MODEL_NAME = "anthropic/claude-sonnet-4.5"
 MAX_TOKENS_PS = 256
 MAX_TOKENS_HINTS = 512
 
@@ -41,57 +41,62 @@ MAX_TOKENS_HINTS = 512
 # ---------------------------------------------------------------------------
 
 PROBLEM_STATEMENT_SYSTEM = (
-    "You are a developer filing a bug report or feature request. "
-    "Write a general issue description that describes the problem or missing functionality. "
-    "Keep it high-level — mention at most 1-2 file or function names to orient the reader, "
-    "but do NOT enumerate every specific function, variable, or line involved. "
-    "Focus on the observable symptoms: what goes wrong, what error occurs, or what behavior is missing. "
-    "CRITICAL: Do NOT suggest or describe any solution, fix, or implementation approach. "
-    "Only describe WHAT is wrong or missing, not HOW to fix it. "
-    "End with a natural question a developer would ask, e.g. "
-    "'Can someone look into this?' or 'Is this the expected behavior?' "
-    "Keep it under 100 words. "
-    "Focus ONLY on Python code changes (.py files). Ignore non-Python files."
+    "You rewrite raw PR/commit descriptions into realistic GitHub issue descriptions, "
+    "matching the style used in SWE-bench and SWE-bench-Pro benchmarks.\n\n"
+    "A good problem statement reads like a real bug report or feature request filed by a user "
+    "who has encountered the problem but does NOT know the fix. It should:\n"
+    "- State the problem from the user's perspective (what they tried, what went wrong)\n"
+    "- Include a short reproduction scenario or code snippet when possible\n"
+    "- Show expected vs actual behavior for bugs\n"
+    "- Describe the desired capability for feature requests\n"
+    "- NEVER mention the fix, patch, implementation, or solution\n"
+    "- NEVER reference PR numbers, commit SHAs, or that a fix exists\n"
+    "- Use natural developer language, not formal spec language\n"
+    "- Focus only on Python (.py) files; ignore non-Python changes"
 )
 
-PROBLEM_STATEMENT_USER = """## Source issue description
+PROBLEM_STATEMENT_USER = """## Raw PR/commit description
 {source}
 
-## Code context (changed functions and module-level changes)
+## Code context (affected functions/modules)
 {context_str}
 
-Write an issue description in approximately 80 words. It must:
-1. Describe the observable problem or missing feature at a high level
-2. Mention at most 1-2 file/function names for orientation — do not list every affected location
-3. Do NOT describe any solution or what the correct behavior "should be" — only describe the problem
-4. End with a question
+Rewrite the above into a GitHub issue that a developer would file BEFORE any fix exists.
 
-Write in plain prose (no bullet points, no headers). Return only the issue description text."""
+Format:
+<title line — a short summary of the bug or feature request>
+
+<body — 60-120 words describing the problem. For bugs, include: what the user did, what happened, what they expected. For features, include: what capability is missing and a usage scenario. If possible, include a minimal code snippet showing the broken or missing behavior.>
+
+Rules:
+- Write as if you do NOT know the solution
+- Do NOT say "should be changed to", "needs to be fixed by", or describe any implementation
+- Do NOT reference any PR, commit, or that a patch exists
+- Keep it natural — this should read like a real GitHub issue
+
+Return only the issue text (title + body), no extra commentary."""
 
 HINTS_SYSTEM = (
-    "You are a senior developer providing diagnostic hints for a bug report. "
-    "Write a detailed technical analysis that helps another developer locate and fix the issue. "
-    "Name every specific function, class, and file involved. "
-    "Point out the exact location(s) where the bug manifests or where changes are needed. "
-    "Describe what the code currently does wrong and hint at the direction of the fix "
-    "(e.g. 'the condition should also check X' or 'this value needs to be passed through'). "
-    "Keep it under 200 words. "
-    "Focus ONLY on Python code changes (.py files). Ignore non-Python files."
+    "You provide diagnostic hints that help a developer locate the root cause. "
+    "You know the codebase well and can point to specific locations, but you "
+    "do not give away the complete solution — only enough to guide investigation.\n"
+    "Focus only on Python (.py) files."
 )
 
-HINTS_USER = """## Source issue description
+HINTS_USER = """## Problem description
 {source}
 
-## Code context (changed functions and module-level changes)
+## Code context (affected functions/modules)
 {context_str}
 
-Write detailed diagnostic hints in approximately 150 words. It must:
-1. Name every specific function, class, and file involved
-2. Describe what the code currently does wrong at each location
-3. Hint at the direction of the fix without giving the full solution
-4. Focus ONLY on Python (.py) file changes
+Write diagnostic hints (100-150 words) that help a developer find and fix this issue:
+- Name every specific file, class, and function involved
+- Describe what the code currently does at each location and why it's wrong
+- Point toward the fix direction without spelling out the complete solution
+  (e.g. "the validation in X.validate() doesn't account for Y" or
+   "this function needs to propagate Z to its caller")
 
-Write in plain prose. Return only the hints text."""
+Return only the hints text, plain prose."""
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +225,6 @@ def main(output_dir: str, workers: int):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir", help="Directory containing instances_all_*.jsonl")
-    parser.add_argument("--workers", type=int, default=4, help="Number of concurrent LLM calls (default: 4)")
+    parser.add_argument("--workers", type=int, default=30, help="Number of concurrent LLM calls (default: 4)")
     args = parser.parse_args()
     main(args.output_dir, args.workers)

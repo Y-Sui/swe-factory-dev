@@ -25,8 +25,9 @@ from utils import (
     CODE_CHANGE_TITLE_RE,
 )
 
-# Commits touching more than this many py files are decomposed into per-file instances.
-MAX_PY_FILES_PER_INSTANCE = 4
+# Commits touching more than DECOMPOSE_THRESHOLD py files are split into chunks of CHUNK_SIZE.
+DECOMPOSE_THRESHOLD = 6
+CHUNK_SIZE = 4
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -82,14 +83,14 @@ def _match_test_to_code_files(test_file: str, code_files: set[str]) -> bool:
 
 def _decompose_instance(instance: dict, context_files: list[str]) -> list[dict]:
     """
-    If a commit touches more than MAX_PY_FILES_PER_INSTANCE Python files,
-    split it into groups of sub-instances. Each sub-instance gets only the
-    patch, test_patch, and patch_context relevant to its file group.
+    If a commit touches more than DECOMPOSE_THRESHOLD Python files,
+    split it into chunks of CHUNK_SIZE sub-instances. Each sub-instance gets
+    only the patch, test_patch, and patch_context relevant to its file group.
 
     Returns the original instance unchanged if under the threshold.
     """
     context = instance["patch_context"]
-    if len(context) <= MAX_PY_FILES_PER_INSTANCE:
+    if len(context) <= DECOMPOSE_THRESHOLD:
         return [instance]
 
     # Pre-split patch and test_patch by file
@@ -98,10 +99,10 @@ def _decompose_instance(instance: dict, context_files: list[str]) -> list[dict]:
 
     # Chunk patch_context and context_files together
     chunks = []
-    for i in range(0, len(context), MAX_PY_FILES_PER_INSTANCE):
+    for i in range(0, len(context), CHUNK_SIZE):
         chunks.append((
-            context[i:i + MAX_PY_FILES_PER_INSTANCE],
-            context_files[i:i + MAX_PY_FILES_PER_INSTANCE],
+            context[i:i + CHUNK_SIZE],
+            context_files[i:i + CHUNK_SIZE],
         ))
 
     sub_instances = []
@@ -136,7 +137,7 @@ def _decompose_instance(instance: dict, context_files: list[str]) -> list[dict]:
 
     logger.info(
         f"Decomposed {instance['instance_id']} into {len(sub_instances)} sub-instances "
-        f"({len(context)} context entries > threshold {MAX_PY_FILES_PER_INSTANCE})"
+        f"({len(context)} context entries > threshold {DECOMPOSE_THRESHOLD}, chunk size {CHUNK_SIZE})"
     )
     return sub_instances
 

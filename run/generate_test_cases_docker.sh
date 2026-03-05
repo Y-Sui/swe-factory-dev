@@ -1,6 +1,10 @@
 #!/bin/bash
 # Stage II: Generate Dockerfiles + eval scripts + test files for all MiroMind repos.
 #
+# Prerequisites:
+#   Run collect_issues_prs.sh first (Stage I) — it collects PRs, builds instances,
+#   and adds version info via get_version.py.
+#
 # Supports incremental runs: instances with an existing status.json in the
 # output directory are automatically skipped by main.py, so you can safely
 # re-run this script with a larger --max-instances (or 0 = all) and only
@@ -15,11 +19,11 @@
 set -euo pipefail
 
 # ── Defaults (override via CLI flags) ────────────────────────────────────────
-MAX_INSTANCES=20      # 0 = all instances
+MAX_INSTANCES=5      # 0 = all instances
 MODEL="openai/gpt-5.2"
 MODEL_SLUG="gpt-5.2"
-ROUND=5
-NUM_PROCS=15
+ROUND=3
+NUM_PROCS=5
 ALL_REPOS=(
   "MiroMindAI__MiroThinker"
   "MiroMindAI__miroflow"
@@ -42,7 +46,6 @@ done
 [[ ${#REPOS[@]} -eq 0 ]] && REPOS=("${ALL_REPOS[@]}")
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-SCRIPT_DIR="data_collection/collect"
 DATA_DIR="/data/yuansui/internal-swe-bench-data"
 SETUP_DIR="testbed"
 
@@ -63,49 +66,18 @@ if ! docker image inspect swe-factory/sd-torchtune:base &>/dev/null; then
     -t swe-factory/sd-torchtune:base -f docker/Dockerfile.sd-torchtune .
 fi
 
-# ── Step 1: Add version info to instances (one-time, in-place) ───────────────
-for REPO in "${REPOS[@]}"; do
-  INSTANCE_FILE=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
-  if [ -z "$INSTANCE_FILE" ]; then
-    echo "=== No instances_all file found for $REPO, skipping ==="
-    continue
-  fi
+# Helper: find the primary instances file (exclude _failures, _versions derivatives).
+find_instances_file() {
+  ls "$DATA_DIR/$1"/instances_all_*.jsonl 2>/dev/null \
+    | grep -v -E '_(failures|versions)' \
+    | head -1
+}
 
-  if python3 - "$INSTANCE_FILE" <<'PY'
-import json, sys
-path = sys.argv[1]
-try:
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            if "version" in obj:
-                sys.exit(0)
-            break
-except FileNotFoundError:
-    pass
-sys.exit(1)
-PY
-  then
-    echo "=== Versions already exist in $INSTANCE_FILE, skipping ==="
-    continue
-  fi
-
-  echo "=== Getting versions for $REPO ==="
-  python3 "$SCRIPT_DIR/get_version.py" \
-    --instance_path "$INSTANCE_FILE" \
-    --testbed "$SETUP_DIR" \
-    --max-workers 10 \
-    --in-place
-done
-
-# ── Step 2: Sample instances & generate task list files ──────────────────────
+# ── Step 1: Sample instances & generate task list files ──────────────────────
 # Output dir is fixed per model (no date suffix) so that status.json from
 # previous runs persists and completed instances are automatically skipped.
 for REPO in "${REPOS[@]}"; do
-  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
+  TASKS_MAP=$(find_instances_file "$REPO")
   if [ -z "$TASKS_MAP" ]; then continue; fi
 
   OUT_DIR="$DATA_DIR/$REPO/setup_output_${MODEL_SLUG}"
@@ -157,10 +129,10 @@ with open(task_list_path, "w", encoding="utf-8") as f:
 PY
 done
 
-# ── Step 3: Run the multi-agent pipeline (parallel across repos) ─────────────
+# ── Step 2: Run the multi-agent pipeline (parallel across repos) ─────────────
 PIDS=()
 for REPO in "${REPOS[@]}"; do
-  TASKS_MAP=$(ls "$DATA_DIR/$REPO"/instances_all_*.jsonl 2>/dev/null | head -1)
+  TASKS_MAP=$(find_instances_file "$REPO")
   if [ -z "$TASKS_MAP" ]; then continue; fi
 
   OUT_DIR="$DATA_DIR/$REPO/setup_output_${MODEL_SLUG}"
@@ -177,8 +149,7 @@ for REPO in "${REPOS[@]}"; do
     --conv-round-limit "$ROUND" \
     --output-dir "$OUT_DIR" \
     --setup-dir "$SETUP_DIR" \
-    --results-path "$RESULT_DIR" \
-    --no-print &
+    --results-path "$RESULT_DIR" &
   PIDS+=($!)
 done
 

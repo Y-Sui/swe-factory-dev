@@ -63,22 +63,31 @@ def get_instances(instance_path: str) -> List[Dict]:
 def prepare_repo_cache(tasks: List[Dict], cache_dir: str, token: str = None) -> Dict[str, str]:
     os.makedirs(cache_dir, exist_ok=True)
     repo_cache = {}
+    # Group tasks by repo to batch-fetch missing commits.
+    from collections import defaultdict
+    commits_by_repo: Dict[str, set] = defaultdict(set)
     for task in tasks:
-        repo = task["repo"]
-        if repo in repo_cache:
-            continue
-        from swe_factory_utils import inject_github_token
+        commits_by_repo[task["repo"]].add(task["base_commit"])
+
+    for repo, commits in commits_by_repo.items():
+        from swe_factory_utils import inject_github_token, fetch_missing_commits
         repo_url = inject_github_token(f"https://github.com/{repo}.git")
         local_path = os.path.join(cache_dir, repo.replace("/", "__"))
-        if os.path.isdir(local_path):
-            repo_cache[repo] = local_path
-            continue
-        try:
-            run_command(["git", "clone", repo_url, local_path], capture_output=True)
-            repo_cache[repo] = local_path
-            print(f"✅ Cached repo: {repo}")
-        except Exception as e:
-            print(f"❌ Failed to clone {repo}: {e}")
+
+        # Clone if not cached.
+        if not os.path.isdir(local_path):
+            try:
+                run_command(["git", "clone", repo_url, local_path], capture_output=True)
+                print(f"✅ Cached repo: {repo}")
+            except Exception as e:
+                print(f"❌ Failed to clone {repo}: {e}")
+                continue
+
+        repo_cache[repo] = local_path
+
+        # Fetch any commits not reachable in the local clone (e.g. force-pushed).
+        fetch_missing_commits(local_path, commits, repo_url)
+
     return repo_cache
 
 def process_repo_task(task: Dict, testbed: str, repo_cache: Dict[str, str]) -> Dict | None:

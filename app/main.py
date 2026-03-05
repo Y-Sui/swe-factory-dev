@@ -447,12 +447,26 @@ def make_swe_tasks(
 
     all_task_ids = sorted(all_task_ids)
 
+    # Pre-fetch missing commits (e.g. from force-pushed PRs) per repo cache.
+    from collections import defaultdict
+    from swe_factory_utils import fetch_missing_commits
+    commits_by_cache: dict[str, tuple[str, list[str]]] = {}  # cache_dir -> (clone_url, [shas])
+    for tid in all_task_ids:
+        info = tasks_map[tid]
+        repo = info["repo"]
+        cache_name = f"{repo}_cache"
+        cache_dir = pjoin(setup_dir, cache_name)
+        if cache_dir not in commits_by_cache:
+            commits_by_cache[cache_dir] = (get_github_clone_url(repo), [])
+        commits_by_cache[cache_dir][1].append(info["base_commit"])
+
+    for cache_dir, (clone_url, shas) in commits_by_cache.items():
+        if os.path.isdir(cache_dir):
+            fetch_missing_commits(cache_dir, set(shas), clone_url)
+
     # for each task in the list to run, create a Task instance
     all_tasks = []
-    
- 
-    # print(len(all_task_ids))
-    # input()
+
     for task_id in all_task_ids:
         setup_info = {}
         task_info = tasks_map[task_id]
