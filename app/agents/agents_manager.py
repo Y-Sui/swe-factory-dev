@@ -30,6 +30,13 @@ class AgentsManager:
     """
     Orchestrates the agent workflow: ContextRetrieval → Dockerfile → WriteTest → EvalScript → TestAnalysis.
     """
+
+    # Class-level Docker image cache shared across instances in the same process.
+    # Key: "repo__version", Value: {"image_name": str, "dockerfile": str}
+    # For cross-process sharing, persisted to docker_image_cache.json in the parent output dir.
+    _docker_image_cache: dict[str, dict] = {}
+    _docker_cache_lock = None  # initialized per-instance from FileLock
+
     def __init__(
         self,
         task: SweTask,
@@ -49,6 +56,11 @@ class AgentsManager:
         self.workflow_finish_status = False
         self.env_recovery_rounds = max(env_recovery_rounds, 0)
         self._pre_build_count = 0  # counter exclusively for _try_build_dockerfile builds
+
+        # Docker image cache file (shared across all instances for this repo)
+        parent_dir = os.path.dirname(self.output_dir)
+        self._docker_cache_file = os.path.join(parent_dir, "docker_image_cache.json")
+        self._docker_cache_file_lock = FileLock(self._docker_cache_file + ".lock", timeout=30)
 
         # Auto-populate base_image from repo name mapping if not already set
         if not getattr(task, "base_image", None):
@@ -120,6 +132,83 @@ class AgentsManager:
             if template:
                 base += f"\n{template}"
         return base
+
+    def _get_version_cache_key(self) -> str:
+        """Cache key for Docker image reuse: repo + version."""
+        repo = self.task.repo_name.replace("/", "__")
+        version = self.task.version or "unknown"
+        return f"{repo}__{version}"
+
+    def _load_docker_image_cache(self) -> dict:
+        """Load the shared Docker image cache from disk."""
+        with self._docker_cache_file_lock:
+            if os.path.exists(self._docker_cache_file):
+                with open(self._docker_cache_file, "r") as f:
+                    return json.load(f)
+        return {}
+
+    def _save_docker_image_cache(self, cache: dict) -> None:
+        """Save the shared Docker image cache to disk."""
+        with self._docker_cache_file_lock:
+            tmp = self._docker_cache_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cache, f, indent=2)
+            os.replace(tmp, self._docker_cache_file)
+
+    def _try_reuse_cached_image(self) -> bool:
+        """Check if a Docker image for this repo+version is already cached.
+
+        If found, sets the TestAnalysisAgent cached image and marks
+        the Dockerfile + context retrieval agents as done.
+        Returns True if reuse succeeded.
+        """
+        cache_key = self._get_version_cache_key()
+        cache = self._load_docker_image_cache()
+        entry = cache.get(cache_key)
+        if not entry:
+            return False
+
+        image_name = entry["image_name"]
+        dockerfile = entry["dockerfile"]
+
+        # Verify the image still exists in Docker
+        try:
+            self.client.images.get(image_name)
+        except docker.errors.ImageNotFound:
+            logger.info(f"Cached image {image_name} no longer exists, will rebuild.")
+            return False
+
+        logger.info(f"Reusing cached Docker image {image_name} for {cache_key}")
+
+        # Set up agents as if Dockerfile was already built
+        analysis_agent: TestAnalysisAgent = self.agents_dict["test_analysis_agent"]
+        analysis_agent._cached_image_name = image_name
+        analysis_agent._cached_dockerfile = dockerfile
+        # Store the commit that was baked into this image so run_test can re-checkout
+        analysis_agent._cached_image_commit = entry.get("commit")
+
+        # Save Dockerfile to output dir for reference
+        docker_agent: WriteDockerfileAgent = self.agents_dict["write_docker_agent"]
+        docker_dir = docker_agent.get_latest_write_dockerfile_output_dir()
+        os.makedirs(docker_dir, exist_ok=True)
+        with open(os.path.join(docker_dir, "Dockerfile"), "w") as f:
+            f.write(dockerfile)
+
+        self.set_agent_status("context_retrieval_agent", True)
+        self.set_agent_status("write_docker_agent", True)
+        return True
+
+    def _cache_docker_image(self, image_name: str, dockerfile: str) -> None:
+        """Save a successfully built Docker image to the shared cache."""
+        cache_key = self._get_version_cache_key()
+        cache = self._load_docker_image_cache()
+        cache[cache_key] = {
+            "image_name": image_name,
+            "dockerfile": dockerfile,
+            "commit": self.task.commit,
+        }
+        self._save_docker_image_cache(cache)
+        logger.info(f"Cached Docker image {image_name} for {cache_key}")
 
     def dump_cost(self):
         end_time = datetime.now()
@@ -330,6 +419,8 @@ class AgentsManager:
             )
             analysis_agent._cached_image_name = image_name
             analysis_agent._cached_dockerfile = dockerfile
+            # Save to shared cache so other instances with same repo+version can reuse
+            self._cache_docker_image(image_name, dockerfile)
             return None
         except Exception as e:
             build_logger.error(f"Dockerfile build failed: {e}")
@@ -338,6 +429,9 @@ class AgentsManager:
             close_logger(build_logger)
 
     def run_workflow(self) -> None:
+        # Try reusing a cached Docker image for this repo+version before entering the loop
+        self._try_reuse_cached_image()
+
         iteration_num = 0
         allowed_iterations = self.max_iteration_num
         remaining_recovery_rounds = self.env_recovery_rounds

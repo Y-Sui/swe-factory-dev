@@ -19,11 +19,11 @@
 set -euo pipefail
 
 # ── Defaults (override via CLI flags) ────────────────────────────────────────
-MAX_INSTANCES=1      # 0 = all instances
+MAX_INSTANCES=0      # 0 = all instances
 MODEL="openai/gpt-5.2"
 MODEL_SLUG="gpt-5.2"
 ROUND=3
-NUM_PROCS=5
+NUM_PROCS=15
 ALL_REPOS=(
   "MiroMindAI__MiroThinker"
   "MiroMindAI__miroflow"
@@ -169,4 +169,47 @@ for PID in "${PIDS[@]}"; do
 done
 [ "$FAIL" -eq 0 ] || exit 1
 
+# ── Step 3: Print summary of results ──────────────────────────────────────────
+echo ""
+echo "=== Results Summary ==="
+for REPO in "${REPOS[@]}"; do
+  OUT_DIR="$DATA_DIR/$REPO/setup_output_${MODEL_SLUG}"
+  [ -d "$OUT_DIR" ] || continue
+
+  OUT_DIR="$OUT_DIR" REPO="$REPO" python3 - <<'SUMMARY'
+import json, os, glob
+
+out_dir = os.environ["OUT_DIR"]
+repo = os.environ["REPO"]
+
+counts = {"FAIL2PASS": 0, "PASS2PASS": 0, "FAIL2FAIL": 0, "PASS2FAIL": 0, "ERROR": 0, "no_f2p": 0, "build_fail": 0}
+total = 0
+
+for status_file in glob.glob(os.path.join(out_dir, "*/status.json")):
+    total += 1
+    with open(status_file) as f:
+        data = json.load(f)
+    f2p = data.get("f2p_classification")
+    if f2p and f2p in counts:
+        counts[f2p] += 1
+    elif not data.get("is_finish"):
+        counts["build_fail"] += 1
+    else:
+        counts["no_f2p"] += 1
+
+print(f"\n  {repo}:")
+print(f"    Total instances: {total}")
+print(f"    FAIL2PASS (success):  {counts['FAIL2PASS']}")
+print(f"    PASS2PASS (too weak): {counts['PASS2PASS']}")
+print(f"    FAIL2FAIL (env issue): {counts['FAIL2FAIL']}")
+print(f"    PASS2FAIL (inverted):  {counts['PASS2FAIL']}")
+print(f"    ERROR:                 {counts['ERROR']}")
+print(f"    Build/other failure:   {counts['build_fail']}")
+if total > 0:
+    rate = counts['FAIL2PASS'] / total * 100
+    print(f"    F2P success rate:      {rate:.1f}%")
+SUMMARY
+done
+
+echo ""
 echo "=== Done ==="

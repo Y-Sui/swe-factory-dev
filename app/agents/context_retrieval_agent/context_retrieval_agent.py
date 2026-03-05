@@ -22,7 +22,7 @@ class ContextRetrievalAgent(Agent):
 
     api_functions: list[str] = ["browse_folder", "search_files_by_keyword", "browse_file_for_environment_info"]
 
-    def __init__(self, task: SweTask, output_dir: str, repo_basic_info: str, max_context_retrieval_round: int = 5):
+    def __init__(self, task: SweTask, output_dir: str, repo_basic_info: str, max_context_retrieval_round: int = 2):
         super().__init__(agent_id="ContextRetrievalAgent")
         self.msg_thread = MessageThread()
         self.task = task

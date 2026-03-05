@@ -61,6 +61,7 @@ class TestAnalysisAgent(Agent):
         self.f2p_classification: str | None = None
         self._cached_image_name: str | None = None   # image tag of last successfully built image
         self._cached_dockerfile: str | None = None   # dockerfile content used for that build
+        self._cached_image_commit: str | None = None  # commit SHA baked into the cached image (for version-based reuse)
         self.test_file_contents: dict[str, str] = {}  # actual test file source code from WriteTestAgent
 
     def init_msg_thread(self) -> None:
@@ -528,6 +529,25 @@ class TestAnalysisAgent(Agent):
             post_container.start()
             run_test_logger.info(f"Both containers started for parallel F2P test")
             tool_output += "Containers started for parallel pre/post-patch testing.\n"
+
+            # If reusing a cached image built for a different commit, checkout to the correct one
+            target_commit = self.task.commit
+            if self._cached_image_commit and self._cached_image_commit != target_commit:
+                run_test_logger.info(
+                    f"Image was built for commit {self._cached_image_commit[:8]}, "
+                    f"checking out to {target_commit[:8]} in both containers"
+                )
+                checkout_cmd = f"cd /testbed && git checkout {target_commit} && git clean -fd"
+                for ctr, label in [(pre_container, "pre"), (post_container, "post")]:
+                    val = ctr.exec_run(checkout_cmd, workdir="/testbed", user="root")
+                    if val.exit_code != 0:
+                        raise EvaluationError(
+                            instance_id,
+                            f"Failed to checkout {target_commit[:8]} in {label} container: "
+                            f"{val.output.decode('utf-8', errors='replace')}",
+                            run_test_logger,
+                        )
+                tool_output += f"Checked out to commit {target_commit[:8]} in both containers.\n"
 
             # Shared result holders
             pre_result = {"output": None, "exit_code": None, "error": None}
