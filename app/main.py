@@ -681,17 +681,27 @@ def run_raw_task(
     # task_output_dir = pjoin(globals.output_dir, f"{task_id}_{start_time_s}")
     task_output_dir = pjoin(globals.output_dir, f"{task_id}")
     
+    # Check both direct path and applicable_setup/ (post-process moves dirs there)
+    applicable_dir = pjoin(os.path.dirname(task_output_dir), "applicable_setup", task_id)
+    for check_dir in [task_output_dir, applicable_dir]:
+        check_status = pjoin(check_dir, "status.json")
+        if os.path.exists(check_status):
+            try:
+                with open(check_status, "r") as sf:
+                    status_data = json.load(sf)
+                if status_data.get("is_finish", False):
+                    log.log_and_always_print(f"Task {task_id} already finished, skipping")
+                    return True
+            except (json.JSONDecodeError, OSError):
+                pass
+
     status_file = pjoin(task_output_dir, "status.json")
     if os.path.exists(status_file):
         try:
             with open(status_file, "r") as sf:
                 status_data = json.load(sf)
-            if status_data.get("is_finish", False):
-                log.log_and_always_print(f"Task {task_id} already finished, skipping")
-                return True
-            else:
-                log.log_and_always_print(f"Task {task_id} has is_finish=False, clearing and re-running")
-                shutil.rmtree(task_output_dir)
+            log.log_and_always_print(f"Task {task_id} has is_finish=False, clearing and re-running")
+            shutil.rmtree(task_output_dir)
         except Exception as e:
             log.log_and_always_print(f"Error reading status for {task_id}: {e}, clearing and re-running")
             shutil.rmtree(task_output_dir)

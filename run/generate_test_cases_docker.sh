@@ -20,7 +20,8 @@ set -euo pipefail
 
 # ── Defaults (override via CLI flags) ────────────────────────────────────────
 MAX_INSTANCES=0      # 0 = all instances
-MODEL="openai/gpt-5.2"
+# MODEL="openai/gpt-5.2"
+MODEL="openai/gpt-5.3-codex"
 MODEL_SLUG="gpt-5.2"
 ROUND=3
 NUM_PROCS=15
@@ -123,21 +124,27 @@ else:
     selected = all_ids
 
 # Filter out already-completed instances (is_finish=True in status.json).
+# Check both direct path and applicable_setup/ (post-process moves dirs there).
 # Instances with is_finish=False will be re-run.
 pending = []
 already_done = 0
 for iid in selected:
-    status_path = os.path.join(out_dir, iid, "status.json")
-    if os.path.exists(status_path):
-        try:
-            with open(status_path) as sf:
-                status = json.load(sf)
-            if status.get("is_finish", False):
-                already_done += 1
-                continue
-        except (json.JSONDecodeError, OSError):
-            pass
-    pending.append(iid)
+    found_done = False
+    for subdir in [iid, os.path.join("applicable_setup", iid)]:
+        status_path = os.path.join(out_dir, subdir, "status.json")
+        if os.path.exists(status_path):
+            try:
+                with open(status_path) as sf:
+                    status = json.load(sf)
+                if status.get("is_finish", False):
+                    found_done = True
+                    break
+            except (json.JSONDecodeError, OSError):
+                pass
+    if found_done:
+        already_done += 1
+    else:
+        pending.append(iid)
 
 print(f"  Total instances: {total}, selected: {len(selected)}, "
       f"already done: {already_done}, to run: {len(pending)}")
@@ -178,46 +185,13 @@ for PID in "${PIDS[@]}"; do
 done
 [ "$FAIL" -eq 0 ] || exit 1
 
-# ── Step 3: Print summary of results ──────────────────────────────────────────
+# ── Step 2.5: Rebuild results.json from applicable_setup directories ─────────
 echo ""
-echo "=== Results Summary ==="
+echo "=== Rebuilding results.json ==="
 for REPO in "${REPOS[@]}"; do
   OUT_DIR="$DATA_DIR/$REPO/setup_output_${MODEL_SLUG}"
-  [ -d "$OUT_DIR" ] || continue
-
-  OUT_DIR="$OUT_DIR" REPO="$REPO" python3 - <<'SUMMARY'
-import json, os, glob
-
-out_dir = os.environ["OUT_DIR"]
-repo = os.environ["REPO"]
-
-counts = {"FAIL2PASS": 0, "PASS2PASS": 0, "FAIL2FAIL": 0, "PASS2FAIL": 0, "ERROR": 0, "no_f2p": 0, "build_fail": 0}
-total = 0
-
-for status_file in glob.glob(os.path.join(out_dir, "*/status.json")):
-    total += 1
-    with open(status_file) as f:
-        data = json.load(f)
-    f2p = data.get("f2p_classification")
-    if f2p and f2p in counts:
-        counts[f2p] += 1
-    elif not data.get("is_finish"):
-        counts["build_fail"] += 1
-    else:
-        counts["no_f2p"] += 1
-
-print(f"\n  {repo}:")
-print(f"    Total instances: {total}")
-print(f"    FAIL2PASS (success):  {counts['FAIL2PASS']}")
-print(f"    PASS2PASS (too weak): {counts['PASS2PASS']}")
-print(f"    FAIL2FAIL (env issue): {counts['FAIL2FAIL']}")
-print(f"    PASS2FAIL (inverted):  {counts['PASS2FAIL']}")
-print(f"    ERROR:                 {counts['ERROR']}")
-print(f"    Build/other failure:   {counts['build_fail']}")
-if total > 0:
-    rate = counts['FAIL2PASS'] / total * 100
-    print(f"    F2P success rate:      {rate:.1f}%")
-SUMMARY
+  [ -d "$OUT_DIR/applicable_setup" ] || continue
+  python3 scripts/rebuild_results.py "$OUT_DIR"
 done
 
 echo ""

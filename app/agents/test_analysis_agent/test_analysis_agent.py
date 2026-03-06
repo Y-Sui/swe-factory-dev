@@ -537,7 +537,7 @@ class TestAnalysisAgent(Agent):
                     f"Image was built for commit {self._cached_image_commit[:8]}, "
                     f"checking out to {target_commit[:8]} in both containers"
                 )
-                checkout_cmd = f"cd /testbed && git checkout {target_commit} && git clean -fd"
+                checkout_cmd = ["bash", "-c", f"cd /testbed && git checkout {target_commit} && git clean -fd"]
                 for ctr, label in [(pre_container, "pre"), (post_container, "post")]:
                     val = ctr.exec_run(checkout_cmd, workdir="/testbed", user="root")
                     if val.exit_code != 0:
