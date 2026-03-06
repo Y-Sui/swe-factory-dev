@@ -21,7 +21,7 @@ set -euo pipefail
 # ── Defaults (override via CLI flags) ────────────────────────────────────────
 MAX_INSTANCES=0      # 0 = all instances
 # MODEL="openai/gpt-5.2"
-MODEL="openai/gpt-5.3-codex"
+MODEL="openai/gpt-5.2-codex"
 MODEL_SLUG="gpt-5.2"
 ROUND=3
 NUM_PROCS=15

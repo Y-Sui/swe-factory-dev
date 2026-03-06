@@ -411,6 +411,10 @@ class Gpt5_2(OpenaiModel):
     def __init__(self):
         super().__init__("openai/gpt-5.2", 16384, 0.00000175, 0.000014)
 
+class Gpt5_2_Codex(OpenaiModel):
+    def __init__(self):
+        super().__init__("openai/gpt-5.2-codex", 16384, 0.00000175, 0.000014)
+
 class Gpt5_3_Codex(OpenaiModel):
     def __init__(self):
         super().__init__("openai/gpt-5.3-codex", 16384, 0.00000175, 0.000014)
