@@ -180,3 +180,4 @@ scripts/report/*.json
 run_instances/
 reports/
 inspection_output/
+run_logs/

@@ -449,6 +449,11 @@ class Qwen35_Flash(OpenaiModel):
         super().__init__("qwen/qwen3.5-flash-02-23", 8192, 0.00000014, 0.00000028)
         self.note = "Qwen3.5-Flash."
 
+class Qwen35_35B_A3B(OpenaiModel):
+    def __init__(self):
+        super().__init__("qwen/qwen3.5-35b-a3b", 8192, 0.00000014, 0.00000028)
+        self.note = "Qwen3.5-35B-A3B."
+
 class DeepSeekV25(OpenaiModel):
     def __init__(self):
         super().__init__("deepseek-chat", 4096,0.00000014,  0.00000028)
