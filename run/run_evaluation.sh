@@ -1,8 +1,13 @@
-# Verify the generated docker file and test files with gold patch F2P check
+#!/usr/bin/env bash
+# Verify generated docker files and test files with gold patch F2P check
+# Usage: ./run/run_evaluation.sh [extra_args...]
+set -euo pipefail
+
+DATASET="/home/yuansui/swe-factory-dev/internal-swe-bench-data/results_v1_gpt_5_2_68_20260307_verified.json"
 
 python3 evaluation/run_evaluation.py \
-    --dataset_name "/home/yuansui/swe-factory-dev/internal-swe-bench-data/results_v1_gpt_5_2_40_20260306.json" \
-    --predictions_path "gold" \
-    --is_judge_fail2pass \
+    --dataset_path "$DATASET" \
+    --mode benchmark \
     --run_id "all_f2p" \
-    --output_path "run_instances"
+    --output_path "run_instances" \
+    "$@"

@@ -385,6 +385,7 @@ class Agent:
                     messages=messages_,
                     timeout=self.llm_timeout,
                     api_base=self.llm_base_url,
+                    custom_llm_provider="openai",
                     # max_tokens=3000,
                     **kwargs,
                 )

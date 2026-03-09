@@ -101,7 +101,8 @@ class TestSpec:
     def instance_image_key(self):
         if self.image_name:
             return self.image_name
-        return f"setup.{self.instance_id.lower()}:latest"
+        id_docker = self.instance_id.replace("__", "_1776_").lower()
+        return f"swebench/sweb.eval.x86_64.{id_docker}:latest"
 
     def get_instance_container_name(self, run_id=None):
         if not run_id:
@@ -525,11 +526,8 @@ def make_test_spec(instance: SWEbenchInstance,predictions: dict,language = 'pyth
             return json.loads(instance[key])
         return instance[key]
 
-    # pass_to_pass = _from_json_or_obj("PASS_TO_PASS")
-    # fail_to_pass = _from_json_or_obj("FAIL_TO_PASS")
-
-    pass_to_pass = ""
-    fail_to_pass = ""
+    pass_to_pass = _from_json_or_obj("PASS_TO_PASS")
+    fail_to_pass = _from_json_or_obj("FAIL_TO_PASS")
     return TestSpec(
         instance_id=instance_id,
         repo=repo,

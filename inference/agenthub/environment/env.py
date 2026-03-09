@@ -204,6 +204,10 @@ class RepoEnv(gym.Env):
         try:
             # Check if action is in allowed actions/commands
             action_name = action.function_name
+            # Alias: accept "bash" as "execute_bash"
+            if action_name == "bash":
+                action_name = "execute_bash"
+                action.function_name = "execute_bash"
             allowed_cmds = [x.name for x in self.commands]
             assert (
                 action_name in allowed_cmds
