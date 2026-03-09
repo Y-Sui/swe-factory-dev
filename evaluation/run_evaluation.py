@@ -236,8 +236,6 @@ def run_instance_benchmark(
         print(f"Error {instance_id}: {e}")
     finally:
         cleanup_container(client, container, logger)
-        if rm_image:
-            remove_image(client, test_spec.instance_image_key, logger)
         close_logger(logger)
     return instance_id, None
 
@@ -303,8 +301,6 @@ def run_instance_evaluate(
         print(f"Error {instance_id}: {e}")
     finally:
         cleanup_container(client, container, logger)
-        if rm_image:
-            remove_image(client, test_spec.instance_image_key, logger)
         close_logger(logger)
     return instance_id, None
 
@@ -596,7 +592,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_workers", type=int, default=4)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--force_rebuild", action="store_true", default=False)
-    parser.add_argument("--rm_image", action="store_true", default=True)
+    parser.add_argument("--rm_image", action="store_true", default=False)
     parser.add_argument("--open_file_limit", type=int, default=4096)
     parser.add_argument("--reports_dir", default="reports")
     args = parser.parse_args()
