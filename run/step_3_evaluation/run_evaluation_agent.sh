@@ -19,5 +19,5 @@ python3 evaluation/run_evaluation.py \
     "$@"
 
 # Examples:
-# ./run/run_evaluation_agent.sh /home/yuansui/mini-swe-agent/results/anthropic_claude_opus_4_6 opus_eval
-# ./run/run_evaluation_agent.sh /home/yuansui/mini-swe-agent/results/qwen_qwen3_5_35b_a3b qwen_eval
+# ./run/step_3_evaluation/run_evaluation_agent.sh /data/yuansui/internal-swe-bench-data/results/anthropic_claude_opus_4_6 opus_eval
+# ./run/step_3_evaluation/run_evaluation_agent.sh /data/yuansui/internal-swe-bench-data/results/qwen_qwen3_5_35b_a3b qwen_eval

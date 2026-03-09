@@ -152,20 +152,114 @@ def generate_output_path(instance_path: str, suffix="_versions") -> str:
     base, ext = os.path.splitext(instance_path)
     return f"{base}{suffix}{ext}"
 
+
+# ── Batch-mode helpers ────────────────────────────────────────────────────────
+
+import glob as _glob
+
+def find_instances_file(repo_dir: str) -> str | None:
+    """Return the primary instances_all_*.jsonl file, excluding derivative files."""
+    candidates = sorted(_glob.glob(os.path.join(repo_dir, "instances_all_*.jsonl")))
+    for path in candidates:
+        basename = os.path.basename(path)
+        if "_failures" not in basename and "_versions" not in basename:
+            return path
+    return None
+
+
+def count_missing_versions(instance_path: str) -> int:
+    """Count records that lack a 'version' field."""
+    tasks = get_instances(instance_path)
+    return sum(1 for t in tasks if "version" not in t)
+
+
+def cleanup_derivative_files(repo_dir: str) -> None:
+    """Remove _failures and _versions derivative JSONL files."""
+    for pattern in ("*_failures*.jsonl", "*_versions*.jsonl"):
+        for path in _glob.glob(os.path.join(repo_dir, pattern)):
+            os.remove(path)
+            print(f"Cleaned up: {path}")
+
+
+def process_data_dir(data_dir: str, repos: List[str], testbed: str, max_workers: int, token: str | None) -> None:
+    """Batch mode: loop over repo subdirs, version any unversioned records in-place."""
+    for repo_name in repos:
+        repo_dir = os.path.join(data_dir, repo_name)
+        if not os.path.isdir(repo_dir):
+            print(f"=== Directory not found for {repo_name}, skipping ===")
+            continue
+
+        instance_file = find_instances_file(repo_dir)
+        if not instance_file:
+            print(f"=== No instances_all file found for {repo_name}, skipping version step ===")
+            continue
+
+        missing = count_missing_versions(instance_file)
+        if missing == 0:
+            print(f"=== All records in {instance_file} already have version, skipping ===")
+            continue
+
+        print(f"=== {missing} records missing version in {instance_file} ===")
+        print(f"=== Getting versions for {repo_name} ===")
+
+        try:
+            all_tasks = get_instances(instance_file)
+            tasks_need_version = [t for t in all_tasks if "version" not in t]
+            already_versioned = [t for t in all_tasks if "version" in t]
+
+            required_keys = {"repo", "base_commit", "instance_id"}
+            for t in tasks_need_version:
+                if not required_keys.issubset(t):
+                    print(f"Invalid task format: {t}")
+                    continue
+
+            repo_cache_dir = os.path.join(testbed, "_cache")
+            repo_cache = prepare_repo_cache(tasks_need_version, repo_cache_dir, token=token)
+            results, failures = process_repos(tasks_need_version, testbed, repo_cache, max_workers)
+
+            merged = already_versioned + results
+            save_results(merged, instance_file)
+            print(f"✅ {len(results)} newly versioned, {len(already_versioned)} already versioned → saved to {instance_file}")
+
+            if failures:
+                print(f"⚠️  {len(failures)} failures for {repo_name}")
+
+            cleanup_derivative_files(repo_dir)
+
+        except Exception as e:
+            print(f"=== Warning: version lookup failed for {repo_name}: {e} (continuing) ===")
+            continue
+
+
+# ── CLI entry point ───────────────────────────────────────────────────────────
+
+DEFAULT_REPOS = ["MiroMindAI__MiroThinker", "MiroMindAI__miroflow", "MiroMindAI__sd-torchtune"]
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--instance_path", type=str, required=True, help="Path to input task file (.json or .jsonl)")
-    parser.add_argument("--testbed", type=str, required=True, help="Temp working directory for cloning repos")
-    parser.add_argument("--max-workers", type=int, default=10, help="Number of processes (default: 4)")
+    parser.add_argument("--instance_path", type=str, default=None, help="Path to input task file (.json or .jsonl)")
+    parser.add_argument("--testbed", type=str, default="testbed", help="Temp working directory for cloning repos")
+    parser.add_argument("--max-workers", type=int, default=10, help="Number of parallel processes")
     parser.add_argument("--token", type=str, default=None, help="GitHub token for cloning private repos")
     parser.add_argument(
         "--in-place",
         action="store_true",
         help="Overwrite the input instance file with versioned records.",
     )
+    parser.add_argument("--data-dir", type=str, default=None, help="Base directory with repo subdirs (batch mode)")
+    parser.add_argument("--repos", nargs="+", default=DEFAULT_REPOS, help="Repo subdirs to process (batch mode)")
     args = parser.parse_args()
 
     token = args.token or os.environ.get("GITHUB_TOKEN")
+
+    # Batch mode
+    if args.data_dir:
+        process_data_dir(args.data_dir, args.repos, args.testbed, args.max_workers, token)
+        return
+
+    # Single-file mode (original behavior)
+    if not args.instance_path:
+        parser.error("Either --data-dir (batch mode) or --instance_path (single-file mode) is required.")
 
     try:
         tasks = get_instances(args.instance_path)

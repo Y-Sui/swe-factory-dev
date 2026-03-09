@@ -49,7 +49,7 @@ from app.agents.write_eval_script_agent.write_eval_script_utils import (
     extract_eval_script_from_response,
 )
 from app.prompts.prompts import _REPO_ENV_CONFIG
-from swe_factory_utils import classify_f2p, ensure_essentials_in_dockerfile, extract_exit_code
+from swe_factory_utils import classify_f2p, ensure_essentials_in_dockerfile, extract_exit_code, get_clean_command_for_repo
 
 # ---------------------------------------------------------------------------
 # Colored output helpers
@@ -504,7 +504,7 @@ def run_f2p_validation(
                 workdir="/testbed",
                 user="root",
             )
-            clean_cmd = _get_clean_command(repo)
+            clean_cmd = get_clean_command_for_repo(repo)
             container.exec_run(clean_cmd, workdir="/testbed", user="root")
 
             # Run eval.sh (pre-patch)
@@ -598,14 +598,6 @@ def run_f2p_validation(
 
     return result
 
-
-def _get_clean_command(repo: str) -> str:
-    """Return a repo-aware git clean command that preserves virtualenvs."""
-    if repo == "MiroMindAI/miroflow":
-        return "git clean -fdx -e .venv"
-    if repo == "MiroMindAI/MiroThinker":
-        return "git clean -fdx -e .venv -e apps/miroflow-agent/.venv"
-    return "git clean -fdx"
 
 
 def _try_fix_dockerfile(
@@ -1340,58 +1332,35 @@ def _fix_one(args: tuple) -> dict[str, Any]:
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Post-fix failed SWE-bench test generation cases with Docker F2P validation"
-    )
-    parser.add_argument(
-        "--setup-dir", required=True,
-        help="Path to setup_output directory",
-    )
-    parser.add_argument(
-        "--instances-jsonl", required=True,
-        help="Path to instances JSONL file",
-    )
-    parser.add_argument(
-        "--instance", default=None,
-        help="Run only this instance ID (optional)",
-    )
-    parser.add_argument(
-        "--max-rounds", type=int, default=3,
-        help="Max repair rounds per instance (default: 3)",
-    )
-    parser.add_argument(
-        "--skip-docker", action="store_true",
-        help="Skip Docker F2P validation (generate files only)",
-    )
-    parser.add_argument(
-        "--temperature", type=float, default=0.2,
-        help="LLM temperature (default: 0.2)",
-    )
-    parser.add_argument(
-        "--workers", type=int, default=8,
-        help="Number of parallel instances to process (default: 8)",
-    )
-    args = parser.parse_args()
+def run_post_fix(
+    setup_dir: str,
+    instances_jsonl: str,
+    instance: str | None = None,
+    max_rounds: int = 3,
+    skip_docker: bool = False,
+    temperature: float = 0.2,
+    workers: int = 8,
+):
+    """Core post-fix pipeline for a single setup_dir/instances_jsonl pair."""
+    from collections import Counter
 
     print_header("SWE-Factory Post-Fix Pipeline")
 
     # Load instance data
-    instances_map = load_instances_map(args.instances_jsonl)
+    instances_map = load_instances_map(instances_jsonl)
     print(f"  Loaded {Colors.BOLD}{len(instances_map)}{Colors.RESET} instances from JSONL")
 
     # Find failed instances
-    failed = get_failed_instances(args.setup_dir)
+    failed = get_failed_instances(setup_dir)
     print(f"  Found {Colors.BOLD}{Colors.RED}{len(failed)}{Colors.RESET} failed instances")
 
-    if args.instance:
-        failed = [(iid, cls) for iid, cls in failed if iid == args.instance]
+    if instance:
+        failed = [(iid, cls) for iid, cls in failed if iid == instance]
         if not failed:
-            print_fail(f"Instance {args.instance} not found in failed set")
-            sys.exit(1)
+            print_fail(f"Instance {instance} not found in failed set")
+            return
 
     # Show breakdown
-    from collections import Counter
     cls_counts = Counter(cls for _, cls in failed)
     for cls, count in cls_counts.most_common():
         color = Colors.RED if cls == "FAIL2FAIL" else Colors.YELLOW
@@ -1406,17 +1375,17 @@ def main():
         work_items.append(instances_map[instance_id])
 
     print(f"\n  Processing {Colors.BOLD}{len(work_items)}{Colors.RESET} instances "
-          f"(max {args.max_rounds} rounds each, workers={args.workers})")
-    if args.skip_docker:
+          f"(max {max_rounds} rounds each, workers={workers})")
+    if skip_docker:
         print(f"  {Colors.YELLOW}Docker F2P validation: SKIPPED{Colors.RESET}")
     print()
 
     # Process instances in parallel — each worker creates its own LLM client
     results: list[dict[str, Any] | None] = [None] * len(work_items)
     done = 0
-    executor = ThreadPoolExecutor(max_workers=args.workers)
+    executor = ThreadPoolExecutor(max_workers=workers)
     futures = {
-        executor.submit(_fix_one, (args.setup_dir, inst_data, args.skip_docker, args.max_rounds)): i
+        executor.submit(_fix_one, (setup_dir, inst_data, skip_docker, max_rounds)): i
         for i, inst_data in enumerate(work_items)
     }
     try:
@@ -1452,7 +1421,7 @@ def main():
           f"{Colors.RED}{gen_fail} failed{Colors.RESET}, "
           f"{total_rounds} total rounds")
 
-    if not args.skip_docker:
+    if not skip_docker:
         # F2P classification summary
         f2p_counts: dict[str, int] = Counter()
         improved = []
@@ -1516,12 +1485,12 @@ def main():
         # Write back improved results to top-level JSON files
         if improved:
             print_header("WRITING BACK RESULTS")
-            write_back_json_files(args.setup_dir, args.instances_jsonl, improved)
+            write_back_json_files(setup_dir, instances_jsonl, improved)
         else:
             print(f"\n  {Colors.DIM}No improvements to write back.{Colors.RESET}")
 
     # Save summary
-    summary_path = pjoin(args.setup_dir, "post_fix_summary.json")
+    summary_path = pjoin(setup_dir, "post_fix_summary.json")
     with open(summary_path, "w") as f:
         json.dump(results, f, indent=2, default=str)
     print(f"\n  Summary saved to {Colors.DIM}{summary_path}{Colors.RESET}")
@@ -1534,6 +1503,110 @@ def main():
             print(f"    {r['instance_id']}: {r.get('error', 'unknown')}")
 
     print()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Post-fix failed SWE-bench test generation cases with Docker F2P validation"
+    )
+    parser.add_argument(
+        "--setup-dir", default=None,
+        help="Path to setup_output directory (required in single-repo mode)",
+    )
+    parser.add_argument(
+        "--instances-jsonl", default=None,
+        help="Path to instances JSONL file (required in single-repo mode)",
+    )
+    parser.add_argument(
+        "--instance", default=None,
+        help="Run only this instance ID (optional)",
+    )
+    parser.add_argument(
+        "--max-rounds", type=int, default=3,
+        help="Max repair rounds per instance (default: 3)",
+    )
+    parser.add_argument(
+        "--skip-docker", action="store_true",
+        help="Skip Docker F2P validation (generate files only)",
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=0.2,
+        help="LLM temperature (default: 0.2)",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=8,
+        help="Number of parallel instances to process (default: 8)",
+    )
+    # Multi-repo mode
+    parser.add_argument(
+        "--repos", nargs="*", default=None,
+        help="Repos to process in multi-repo mode (default: all repos)",
+    )
+    parser.add_argument(
+        "--model-slug", default=None,
+        help="Model slug for setup_output dir naming (required with --repos)",
+    )
+    parser.add_argument(
+        "--data-dir", default=None,
+        help="Data directory (default: DATA_DIR from generate_task_list)",
+    )
+    args = parser.parse_args()
+
+    if args.repos is not None or args.model_slug is not None:
+        # Multi-repo mode
+        if not args.model_slug:
+            parser.error("--model-slug is required with --repos")
+
+        from scripts.generate_task_list import find_instances_file, DATA_DIR, ALL_REPOS
+        import subprocess
+
+        data_dir = args.data_dir or DATA_DIR
+        repos = args.repos if args.repos else ALL_REPOS
+
+        for repo in repos:
+            instances_file = find_instances_file(data_dir, repo)
+            if not instances_file:
+                print(f"=== No instances file found for {repo}, skipping ===")
+                continue
+
+            setup_dir = os.path.join(data_dir, repo, f"setup_output_{args.model_slug}")
+            if not os.path.isdir(os.path.join(setup_dir, "applicable_setup")):
+                print(f"=== No applicable_setup/ in {setup_dir} for {repo}, skipping ===")
+                continue
+
+            print(f"=== Post-fixing {repo} | rounds={args.max_rounds} | workers={args.workers} ===")
+            try:
+                run_post_fix(
+                    setup_dir=setup_dir,
+                    instances_jsonl=instances_file,
+                    instance=args.instance,
+                    max_rounds=args.max_rounds,
+                    skip_docker=args.skip_docker,
+                    temperature=args.temperature,
+                    workers=args.workers,
+                )
+            except Exception as e:
+                print(f"=== Warning: post-fix had errors for {repo}: {e} (continuing) ===")
+
+            subprocess.run(
+                [sys.executable, "scripts/rebuild_results.py", setup_dir], check=False
+            )
+
+        print("\n=== Post-fix done ===")
+    else:
+        # Single-repo mode (backwards compatible)
+        if not args.setup_dir or not args.instances_jsonl:
+            parser.error("--setup-dir and --instances-jsonl are required (or use --repos with --model-slug)")
+
+        run_post_fix(
+            setup_dir=args.setup_dir,
+            instances_jsonl=args.instances_jsonl,
+            instance=args.instance,
+            max_rounds=args.max_rounds,
+            skip_docker=args.skip_docker,
+            temperature=args.temperature,
+            workers=args.workers,
+        )
 
 
 if __name__ == "__main__":
