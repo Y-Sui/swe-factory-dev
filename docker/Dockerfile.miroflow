@@ -14,8 +14,8 @@ RUN git fetch origin +refs/pull/*/head:refs/pull/*/head
 
 RUN uv sync --frozen
 
-# Install pytest (not in project deps)
-RUN uv pip install pytest
+# Install pytest and coverage (not in project deps)
+RUN uv pip install pytest coverage
 
 # Verify pytest is available
 RUN uv run pytest --version

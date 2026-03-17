@@ -344,7 +344,7 @@ def get_dockerfile_user_prompt_modify() -> str:
 # Maps repo name → (base image tag, base Dockerfile filename, instance-layer guidance)
 _REPO_ENV_CONFIG: dict[str, tuple[str, str, str]] = {
     "MiroMindAI/miroflow": (
-        "swe-factory/miroflow:base",
+        "internal-swe-bench-miroflow:base",
         "Dockerfile.miroflow",
         """\
 ## IMPORTANT: Repository Structure Change
@@ -356,7 +356,7 @@ After `git checkout`, you MUST check which layout applies and set WORKDIR accord
 
 ## What the instance-layer Dockerfile MUST do (and nothing else)
 ```dockerfile
-FROM swe-factory/miroflow:base
+FROM internal-swe-bench-miroflow:base
 WORKDIR /testbed
 RUN git checkout <commit> && git clean -fd
 # Handle monorepo vs flat layout — older commits have no root pyproject.toml
@@ -402,12 +402,12 @@ Always pass `--override-ini="addopts="` to prevent repo-level pytest addopts fro
     ),
 
     "MiroMindAI/MiroThinker": (
-        "swe-factory/mirothinker:base",
+        "internal-swe-bench-mirothinker:base",
         "Dockerfile.mirothinker",
         """\
 ## What the instance-layer Dockerfile MUST do (and nothing else)
 ```dockerfile
-FROM swe-factory/mirothinker:base
+FROM internal-swe-bench-mirothinker:base
 WORKDIR /testbed
 RUN git checkout <commit> && git clean -fd
 WORKDIR /testbed/apps/miroflow-agent
@@ -450,12 +450,12 @@ Always pass `--override-ini="addopts="` to prevent repo-level pytest addopts fro
     ),
 
     "MiroMindAI/sd-torchtune": (
-        "swe-factory/sd-torchtune:base",
+        "internal-swe-bench-sd-torchtune:base",
         "Dockerfile.sd-torchtune",
         """\
 ## What the instance-layer Dockerfile MUST do (and nothing else)
 ```dockerfile
-FROM swe-factory/sd-torchtune:base
+FROM internal-swe-bench-sd-torchtune:base
 WORKDIR /testbed
 RUN git checkout <commit> && git clean -fd
 # Re-apply the torchao compatibility fix after checkout (git clean resets tracked files)

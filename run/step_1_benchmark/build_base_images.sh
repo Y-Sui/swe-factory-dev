@@ -1,14 +1,12 @@
 #!/bin/bash
-# Build base Docker images (skipped if already present).
+# Build base Docker images in parallel (skipped if already present).
 set -euo pipefail
 set -a && source .env && set +a
 
+build() { docker image inspect "$1" &>/dev/null || docker build "${@:2}" -t "$1" .; }
+
 echo "=== Building base images ==="
-docker image inspect swe-factory/miroflow:base &>/dev/null \
-  || docker build -t swe-factory/miroflow:base -f docker/Dockerfile.miroflow . &
-docker image inspect swe-factory/mirothinker:base &>/dev/null \
-  || docker build -t swe-factory/mirothinker:base -f docker/Dockerfile.mirothinker . &
-docker image inspect swe-factory/sd-torchtune:base &>/dev/null \
-  || docker build --build-arg GITHUB_TOKEN="${GITHUB_TOKEN}" \
-       -t swe-factory/sd-torchtune:base -f docker/Dockerfile.sd-torchtune . &
+build internal-swe-bench-miroflow:base     -f docker/Dockerfile.miroflow &
+build internal-swe-bench-mirothinker:base  -f docker/Dockerfile.mirothinker &
+build internal-swe-bench-sd-torchtune:base -f docker/Dockerfile.sd-torchtune --build-arg GITHUB_TOKEN="${GITHUB_TOKEN}" &
 wait

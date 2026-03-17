@@ -16,5 +16,8 @@ WORKDIR /testbed/apps/miroflow-agent
 # Install all deps including dev deps (for pytest)
 RUN uv sync --frozen
 
+# Install coverage
+RUN uv pip install coverage
+
 # Verify pytest is available
 RUN uv run pytest --version

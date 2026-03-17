@@ -101,8 +101,8 @@ class TestSpec:
     def instance_image_key(self):
         if self.image_name:
             return self.image_name
-        id_docker = self.instance_id.replace("__", "_1776_").lower()
-        return f"swebench/sweb.eval.x86_64.{id_docker}:latest"
+        iid = "internal-swe-bench-" + self.instance_id.split("__", 1)[1]
+        return f"swebench/sweb.eval.x86_64.{iid}:latest"
 
     def get_instance_container_name(self, run_id=None):
         if not run_id:

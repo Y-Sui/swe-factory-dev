@@ -21,9 +21,9 @@ import re
 
 # Maps GitHub repo name → pre-built base image tag (built from docker/Dockerfile.<name>)
 REPO_BASE_IMAGES: dict[str, str] = {
-    "MiroMindAI/miroflow":      "swe-factory/miroflow:base",
-    "MiroMindAI/MiroThinker":   "swe-factory/mirothinker:base",
-    "MiroMindAI/sd-torchtune":  "swe-factory/sd-torchtune:base",
+    "MiroMindAI/miroflow":      "internal-swe-bench-miroflow:base",
+    "MiroMindAI/MiroThinker":   "internal-swe-bench-mirothinker:base",
+    "MiroMindAI/sd-torchtune":  "internal-swe-bench-sd-torchtune:base",
 }
 
 

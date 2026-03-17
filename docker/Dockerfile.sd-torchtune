@@ -23,6 +23,9 @@ RUN sed -i 's/from torchao.utils import TORCH_VERSION_AFTER_2_4/from torchao.uti
 # Install project with dev extras
 RUN pip install --no-cache-dir -e ".[dev]"
 
+# Install coverage
+RUN pip install --no-cache-dir coverage
+
 # flash_attn is a hard import in this fork but unavailable without CUDA.
 # Install a minimal stub so imports succeed for CPU-only unit tests.
 RUN python -c "\

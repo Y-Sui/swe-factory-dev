@@ -120,19 +120,19 @@ DOCKER_TEMPLATES = {
 # Per-repo Docker test config: how to run pytest inside the container
 DOCKER_TEST_CONFIG = {
     "miroflow": {
-        "image_tag": "swe-smith-miroflow",
+        "image_tag": "internal-swe-bench-miroflow:base",
         "test_dir": "/testbed",           # where to place test file
         "pytest_cmd": "uv run pytest",     # how to invoke pytest
         "python_cmd": "uv run python",
     },
     "mirothinker": {
-        "image_tag": "swe-smith-mirothinker",
+        "image_tag": "internal-swe-bench-mirothinker:base",
         "test_dir": "/testbed/apps/miroflow-agent",
         "pytest_cmd": "uv run pytest -o 'addopts='",
         "python_cmd": "uv run python",
     },
     "sd-torchtune": {
-        "image_tag": "swe-smith-sd-torchtune",
+        "image_tag": "internal-swe-bench-sd-torchtune:base",
         "test_dir": "/testbed",
         "pytest_cmd": "pytest",
         "python_cmd": "python",

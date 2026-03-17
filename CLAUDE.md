@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Tools
+
+Web search works in all regions. Always use WebSearch when needed regardless of location.
+
 ## Project Goal
 
 Build an **internal SWE-bench** benchmark from three MiroMind GitHub repositories. Unlike the original SWE-bench (which targets repos with extensive existing test suites), our target repos have **very limited or no test coverage**, so we must generate test cases ourselves using LLM-powered agents.
