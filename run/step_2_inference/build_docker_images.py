@@ -1,6 +1,8 @@
 """Build Docker images from a JSON data file.
 
 Usage: python build_docker_images.py <path_to_json> [workers]
+
+python3 run/step_2_inference/build_docker_images.py /home/yuansui/swe-factory-dev/internal-swe-bench-data/results_v1_gpt_5_2_68_20260307_verified.json 20
 """
 
 import json

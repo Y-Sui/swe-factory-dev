@@ -20,7 +20,10 @@ _BASE_IMAGES = {
 
 
 def image_name_for(instance: dict) -> str:
-    # swe-smith instances: use the shared base image directly
+    # Use pinned image from instance if available
+    if instance.get("docker_image"):
+        return instance["docker_image"]
+    # swe-smith instances: fall back to shared base image
     if "-smith-" in instance.get("instance_id", ""):
         repo = instance.get("repo", "")
         if repo in _BASE_IMAGES:
@@ -138,6 +141,63 @@ def _extract_test_content(test_patch: str) -> dict[str, str]:
     if current_file and lines:
         files[current_file] = "\n".join(lines)
     return files
+
+
+# Per-repo test config for validation
+_TEST_CONFIG = {
+    "MiroMindAI/miroflow": {
+        "test_dir": "/testbed",
+        "pytest_cmd": "uv run pytest",
+    },
+    "MiroMindAI/MiroThinker": {
+        "test_dir": "/testbed/apps/miroflow-agent",
+        "pytest_cmd": "uv run pytest -o 'addopts='",
+    },
+    "MiroMindAI/sd-torchtune": {
+        "test_dir": "/testbed",
+        "pytest_cmd": "pytest",
+    },
+}
+
+
+def validate_test_in_docker(instance: dict, test_content: str, timeout: int = 120) -> tuple[bool, str]:
+    """Run test content inside Docker. Returns (passed, output)."""
+    image = image_name_for(instance)
+    if not image_exists(instance):
+        ok, log = build_image(instance)
+        if not ok:
+            return False, f"Docker build failed: {log}"
+
+    repo = instance.get("repo", "")
+    config = _TEST_CONFIG.get(repo, {"test_dir": "/testbed", "pytest_cmd": "pytest"})
+    test_dir = config["test_dir"]
+    pytest_cmd = config["pytest_cmd"]
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", prefix="test_validate_", delete=False) as f:
+        f.write(test_content)
+        host_path = f.name
+
+    container_path = f"{test_dir}/test_validate_tmp.py"
+    try:
+        result = subprocess.run(
+            [
+                "docker", "run", "--rm",
+                "-v", f"{host_path}:{container_path}:ro",
+                "-w", test_dir,
+                image,
+                "bash", "-c",
+                f"{pytest_cmd} {container_path} -x -v --tb=short --no-header 2>&1",
+            ],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        output = result.stdout + result.stderr
+        return result.returncode == 0, output
+    except subprocess.TimeoutExpired:
+        return False, "TIMEOUT"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        Path(host_path).unlink(missing_ok=True)
 
 
 def build_coverage_script(instance: dict) -> str:
