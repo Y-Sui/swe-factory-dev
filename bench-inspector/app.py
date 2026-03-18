@@ -210,8 +210,16 @@ with tab_overview:
         "P2P": [r.p2p_count for r in test_reports],
     }
     if reviews:
-        overview_data["Review"] = [
-            reviews.get(i.get("instance_id", ""), {}).get("score", "")
+        overview_data["PS"] = [
+            reviews.get(i.get("instance_id", ""), {}).get("ps_accuracy", "")
+            for i in instances
+        ]
+        overview_data["Test"] = [
+            reviews.get(i.get("instance_id", ""), {}).get("test_quality", "")
+            for i in instances
+        ]
+        overview_data["Difficulty"] = [
+            reviews.get(i.get("instance_id", ""), {}).get("difficulty", "")
             for i in instances
         ]
     if edits:
@@ -468,7 +476,29 @@ with tab_detail:
     if not filtered_ids:
         st.info("No instances in this category.")
         st.stop()
-    selected_id = st.selectbox("Select instance", filtered_ids)
+
+    # Build display labels with unified sequential index + repo name
+    _label_to_id = {}
+    # Pre-build global index for all instances (not just filtered)
+    if "_display_index" not in st.session_state or st.session_state.get("_display_index_key") != dataset_key:
+        idx_map = {}
+        counter = 1
+        prefix = "internal-swe-bench-smith" if "-smith-" in instances[0].get("instance_id", "") else "internal-swe-bench"
+        for i in instances:
+            iid = i.get("instance_id", "")
+            repo = i.get("repo", "").split("/")[-1] if i.get("repo") else "unknown"
+            idx_map[iid] = f"{prefix}-{counter:04d} [{repo}]"
+            counter += 1
+        st.session_state["_display_index"] = idx_map
+        st.session_state["_display_index_key"] = dataset_key
+    idx_map = st.session_state["_display_index"]
+
+    for rid in filtered_ids:
+        label = idx_map.get(rid, rid)
+        _label_to_id[label] = rid
+    display_labels = list(_label_to_id.keys())
+    selected_label = st.selectbox("Select instance", display_labels)
+    selected_id = _label_to_id[selected_label]
     idx = next(idx for idx, i in enumerate(instances) if i.get("instance_id", "") == selected_id)
     inst = instances[idx]
     ps_r = ps_reports[idx]
@@ -479,27 +509,80 @@ with tab_detail:
     if mode in ("Review", "Edit"):
         st.subheader("Review")
         existing_review = reviews.get(selected_id, {})
-        score_options = ["—", "good", "bad", "needs-fix"]
-        current_score = existing_review.get("score", "—")
-        score_idx = score_options.index(current_score) if current_score in score_options else 0
 
-        rc1, rc2 = st.columns([1, 3])
-        new_score = rc1.radio(
-            "Score", score_options, index=score_idx,
-            key=f"review_score_{selected_id}", horizontal=True,
+        # 1. Problem Statement
+        st.markdown("**1. Problem Statement**")
+        ps_accuracy_opts = ["—", "accurate", "inaccurate", "vague"]
+        ps_accuracy_cur = existing_review.get("ps_accuracy", "—")
+        ps_accuracy = st.radio(
+            "Accuracy (Indicate if the problem statement accurately describes the issue)", ps_accuracy_opts,
+            index=ps_accuracy_opts.index(ps_accuracy_cur) if ps_accuracy_cur in ps_accuracy_opts else 0,
+            key=f"ps_accuracy_{selected_id}", horizontal=True,
         )
-        new_comment = rc2.text_input(
-            "Comment", value=existing_review.get("comment", ""),
+        ps_leakage_opts = ["—", "no leakage", "minor leakage", "major leakage"]
+        ps_leakage_cur = existing_review.get("ps_leakage", "—")
+        ps_leakage = st.radio(
+            "Leakage (Indicate if there is any leakage in the problem statement)", ps_leakage_opts,
+            index=ps_leakage_opts.index(ps_leakage_cur) if ps_leakage_cur in ps_leakage_opts else 0,
+            key=f"ps_leakage_{selected_id}", horizontal=True,
+        )
+
+        # 2. Unit Test Quality
+        st.markdown("**2. Unit Test Quality**")
+        test_coverage_opts = ["—", "full", "partial", "none"]
+        test_coverage_cur = existing_review.get("test_coverage", "—")
+        test_coverage = st.radio(
+            "Gold patch coverage (whether the unit test cover the entire golden patch)", test_coverage_opts,
+            index=test_coverage_opts.index(test_coverage_cur) if test_coverage_cur in test_coverage_opts else 0,
+            key=f"test_coverage_{selected_id}", horizontal=True,
+        )
+        test_quality_opts = ["—", "good", "acceptable", "poor"]
+        test_quality_cur = existing_review.get("test_quality", "—")
+        test_quality = st.radio(
+            "Overall test quality", test_quality_opts,
+            index=test_quality_opts.index(test_quality_cur) if test_quality_cur in test_quality_opts else 0,
+            key=f"test_quality_{selected_id}", horizontal=True,
+        )
+        test_issues = st.text_area(
+            "Test issues (if poor, explain why; for example, you can point out specific missing cases, or which test file is low quality. You can provide the function name in this field to be more specific, e.g. `test_f2p_task_to_json_preserves_unicode`)",
+            value=existing_review.get("test_issues", ""),
+            key=f"test_issues_{selected_id}",
+            height=80,
+        )
+
+        # 3. Difficulty
+        st.markdown("**3. Difficulty**")
+        diff_opts = ["—", "easy", "medium", "hard"]
+        diff_cur = existing_review.get("difficulty", "—")
+        difficulty = st.radio(
+            "Difficulty (You can measure the difficulty based on the complexity of the problem statement and the golden patch)", diff_opts,
+            index=diff_opts.index(diff_cur) if diff_cur in diff_opts else 0,
+            key=f"difficulty_{selected_id}", horizontal=True,
+        )
+
+        # Comment
+        comment = st.text_input(
+            "Additional comment (You can provide any additional context or notes about the review here)",
+            value=existing_review.get("comment", ""),
             key=f"review_comment_{selected_id}",
         )
 
         if st.button("Save Review", key=f"save_review_{selected_id}"):
-            if new_score != "—":
-                save_review(dataset_key, selected_id, new_score, new_comment)
+            filled = [v for v in [ps_accuracy, ps_leakage, test_coverage, test_quality, difficulty] if v != "—"]
+            if not filled:
+                st.warning("Fill in at least one field")
+            else:
+                save_review(dataset_key, selected_id, {
+                    "ps_accuracy": ps_accuracy,
+                    "ps_leakage": ps_leakage,
+                    "test_coverage": test_coverage,
+                    "test_quality": test_quality,
+                    "test_issues": test_issues,
+                    "difficulty": difficulty,
+                    "comment": comment,
+                })
                 st.success("Review saved")
                 st.rerun()
-            else:
-                st.warning("Select a score first")
 
         st.markdown("---")
 

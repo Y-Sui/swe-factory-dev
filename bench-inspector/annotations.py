@@ -20,17 +20,15 @@ def dataset_key_from_path(file_path: str) -> str:
 def load_reviews(dataset_key: str) -> dict:
     p = _dataset_dir(dataset_key) / "reviews.json"
     if p.exists():
-        return json.loads(p.read_text())
+        text = p.read_text().strip()
+        return json.loads(text) if text else {}
     return {}
 
 
-def save_review(dataset_key: str, instance_id: str, score: str, comment: str):
+def save_review(dataset_key: str, instance_id: str, review_data: dict):
     reviews = load_reviews(dataset_key)
-    reviews[instance_id] = {
-        "score": score,
-        "comment": comment,
-        "ts": datetime.now(timezone.utc).isoformat(),
-    }
+    review_data["ts"] = datetime.now(timezone.utc).isoformat()
+    reviews[instance_id] = review_data
     p = _dataset_dir(dataset_key) / "reviews.json"
     p.write_text(json.dumps(reviews, indent=2))
 
@@ -38,7 +36,8 @@ def save_review(dataset_key: str, instance_id: str, score: str, comment: str):
 def load_edits(dataset_key: str) -> dict:
     p = _dataset_dir(dataset_key) / "edits.json"
     if p.exists():
-        return json.loads(p.read_text())
+        text = p.read_text().strip()
+        return json.loads(text) if text else {}
     return {}
 
 
