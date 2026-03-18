@@ -29,6 +29,7 @@ output*/
 testbed/
 data/
 internal-swe-bench-data
+bench-inspector/coverage_cache/
 evaluation/run_instance/
 evaluation/run_instance*
 # PyInstaller

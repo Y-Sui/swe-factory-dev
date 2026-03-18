@@ -20,7 +20,7 @@ from config import DOCKER_TEST_CONFIG, REPOS
 def measure_one(instance: dict, repo_key: str) -> dict:
     """Run test with branch coverage for one instance. Returns coverage info."""
     config = DOCKER_TEST_CONFIG[repo_key]
-    image_tag = config["image_tag"]
+    image_tag = instance.get("docker_image") or config["image_tag"]
     test_dir = config["test_dir"]
 
     meta = instance["function_metadata"]

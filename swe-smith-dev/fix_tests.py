@@ -758,9 +758,10 @@ def test_load_dtype_conversion():
         assert called_tensor.dtype == torch.float32
 '''
 
-def validate_test_docker(test_source: str, repo: str) -> tuple:
+def validate_test_docker(test_source: str, repo: str, docker_image: str = "") -> tuple:
     """Run test in Docker, return (passed, output)."""
     config = DOCKER_CONFIG[repo]
+    image_tag = docker_image or config["image_tag"]
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", prefix="test_fix_", delete=False) as f:
         f.write(test_source)
         host_path = f.name
@@ -772,7 +773,7 @@ def validate_test_docker(test_source: str, repo: str) -> tuple:
                 "docker", "run", "--rm",
                 "-v", f"{host_path}:{container_path}:ro",
                 "-w", config["test_dir"],
-                config["image_tag"],
+                image_tag,
                 "bash", "-c",
                 f"{config['pytest_cmd']} {container_path} -x -v --tb=short --no-header 2>&1",
             ],
@@ -816,7 +817,7 @@ def main():
         print(f"{'='*60}")
 
         # Validate in Docker
-        ok, output = validate_test_docker(new_test, repo)
+        ok, output = validate_test_docker(new_test, repo, inst.get("docker_image", ""))
 
         if ok:
             print(f"  PASS — updating instance")

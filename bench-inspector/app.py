@@ -12,7 +12,7 @@ from analyzer import (
     check_test_patch,
     compute_dataset_summary,
 )
-from coverage_runner import run_coverage_in_docker, format_coverage_summary, build_all_images, image_exists
+from coverage_runner import run_coverage_in_docker, run_all_coverage, format_coverage_summary, build_all_images, image_exists
 
 st.set_page_config(page_title="SWE-bench Inspector", layout="wide")
 
@@ -185,6 +185,55 @@ with tab_patch:
             "Total Lines": r.stats["total_lines"],
         })
     st.dataframe(pd.DataFrame(patch_table), use_container_width=True, hide_index=True, height=500)
+
+    # Batch coverage
+    st.markdown("---")
+    st.subheader("Batch Coverage")
+    cov_workers = st.number_input("Parallel workers", min_value=1, max_value=32, value=16, key="cov_workers")
+
+    if st.button("Run All Coverage"):
+        coverable = [i for i in instances if i.get("dockerfile") or i.get("docker_template")]
+        if not coverable:
+            st.warning("No instances have Dockerfiles")
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            progress = st.progress(0, text="Running coverage...")
+            status_area = st.empty()
+            total = len(coverable)
+            cov_results = {}
+
+            with ThreadPoolExecutor(max_workers=cov_workers) as pool:
+                futures = {
+                    pool.submit(run_coverage_in_docker, inst): inst.get("instance_id", "unknown")
+                    for inst in coverable
+                }
+                for i, future in enumerate(as_completed(futures), 1):
+                    iid = futures[future]
+                    result = future.result()
+                    cov_results[iid] = result
+                    progress.progress(i / total, text=f"{i}/{total}: {iid[:30]}")
+                    cov = result.get("coverage", {})
+                    pct = cov.get("totals", {}).get("percent_covered")
+                    label = f"{pct:.1f}%" if pct is not None else ("error" if result.get("error") else "done")
+                    status_area.text(f"{iid[:30]}: {label}")
+
+            # Show summary table
+            cov_rows = []
+            for iid, res in cov_results.items():
+                patch = next((i.get("patch", "") for i in instances if i.get("instance_id") == iid), "")
+                summary_cov = format_coverage_summary(res.get("coverage", {}), patch=patch)
+                cov_rows.append({
+                    "instance_id": iid,
+                    "coverage%": f"{summary_cov['total_coverage']:.1f}" if summary_cov["total_coverage"] is not None else "N/A",
+                    "stmts": summary_cov.get("total_stmts", 0),
+                    "miss": summary_cov.get("total_miss", 0),
+                    "exit_code": res.get("exit_code", ""),
+                })
+            st.session_state["batch_cov_results"] = cov_rows
+            st.success(f"Done: {len(cov_results)} instances")
+
+    if "batch_cov_results" in st.session_state:
+        st.dataframe(pd.DataFrame(st.session_state["batch_cov_results"]), use_container_width=True, hide_index=True, height=300)
 
 
 # ========================== TEST PATCHES ====================================

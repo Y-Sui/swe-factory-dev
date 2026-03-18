@@ -5,8 +5,10 @@ import re
 import tempfile
 import subprocess
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+COVERAGE_CACHE_DIR = Path(__file__).parent / "coverage_cache"
 
 
 # Map repo name to existing swe-smith base images
@@ -25,7 +27,7 @@ def image_name_for(instance: dict) -> str:
             return _BASE_IMAGES[repo]
     # internal-bench: reuse the image built by the main pipeline
     raw_id = instance.get("instance_id", "unknown")
-    iid = "internal-swe-bench-" + raw_id.split("__", 1)[1] if "__" in raw_id else raw_id
+    iid = ("internal-swe-bench-" + raw_id.split("__", 1)[1]).lower() if "__" in raw_id else raw_id.lower()
     return f"swebench/sweb.eval.x86_64.{iid}:latest"
 
 
@@ -147,12 +149,11 @@ def build_coverage_script(instance: dict) -> str:
     test_contents = _extract_test_content(test_patch)
 
     workdir = "/testbed"
-    coverage_cmd = "coverage"
+    pip_cmd = "pip"
     if "miroflow" in repo:
-        coverage_cmd = ".venv/bin/coverage"
+        pip_cmd = ".venv/bin/pip"
     elif "MiroThinker" in repo:
-        workdir = "/testbed/apps/miroflow-agent"
-        coverage_cmd = ".venv/bin/coverage"
+        pip_cmd = "/testbed/apps/miroflow-agent/.venv/bin/pip"
 
     base_commit = instance.get("base_commit", "")
 
@@ -165,7 +166,11 @@ def build_coverage_script(instance: dict) -> str:
     if base_commit:
         script_lines.append(f"git checkout {base_commit} 2>/dev/null || true")
 
-    script_lines += [f"cd {workdir}", ""]
+    script_lines += [
+        f"cd {workdir}",
+        f"{pip_cmd} install coverage 2>/dev/null || pip install coverage 2>/dev/null || true",
+        "",
+    ]
 
     for fpath, content in test_contents.items():
         dir_part = str(Path(fpath).parent)
@@ -190,8 +195,14 @@ def build_coverage_script(instance: dict) -> str:
         ]
 
     test_file_args = " ".join(f'"{f}"' for f in test_files) if test_files else "tests/"
+    # Derive --source from gold patch: extract top-level dirs of modified source files
+    source_files = _get_patch_source_files(patch)
+    source_dirs = sorted(set(f.split("/")[0] for f in source_files if "/" in f)) if source_files else []
+    source_arg = f'--source={",".join(source_dirs)} ' if source_dirs else ""
+    # Use whichever coverage binary is available
+    coverage_cmd = f"{pip_cmd.rsplit('/', 1)[0]}/coverage" if "/" in pip_cmd else "coverage"
     script_lines += [
-        f'{coverage_cmd} run --branch -m pytest {test_file_args} -v --override-ini="addopts=" 2>&1',
+        f'{coverage_cmd} run --branch {source_arg}-m pytest {test_file_args} -v --override-ini="addopts=" 2>&1',
         "rc=$?",
         f"{coverage_cmd} json -o /tmp/cov.json 2>/dev/null || true",
         'echo "===COVERAGE_JSON_START==="',
@@ -207,7 +218,31 @@ def build_coverage_script(instance: dict) -> str:
 # Run coverage (image must already exist)
 # ---------------------------------------------------------------------------
 
-def run_coverage_in_docker(instance: dict, timeout: int = 300) -> dict:
+def _cache_path(instance_id: str) -> Path:
+    return COVERAGE_CACHE_DIR / f"{instance_id}.json"
+
+
+def load_cached_coverage(instance_id: str) -> dict | None:
+    p = _cache_path(instance_id)
+    if p.exists():
+        return json.loads(p.read_text())
+    return None
+
+
+def save_cached_coverage(instance_id: str, result: dict) -> None:
+    COVERAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _cache_path(instance_id).write_text(json.dumps(result))
+
+
+def run_coverage_in_docker(instance: dict, timeout: int = 300, use_cache: bool = True) -> dict:
+    iid = instance.get("instance_id", "unknown")
+
+    if use_cache:
+        cached = load_cached_coverage(iid)
+        if cached is not None:
+            cached["cached"] = True
+            return cached
+
     name = image_name_for(instance)
 
     if not image_exists(instance):
@@ -235,11 +270,38 @@ def run_coverage_in_docker(instance: dict, timeout: int = 300) -> dict:
     output = result.stdout + result.stderr
     cov_data = _extract_coverage_json(output)
 
-    return {
+    result_dict = {
         "exit_code": result.returncode,
         "output": output[-5000:],
         "coverage": cov_data,
     }
+    save_cached_coverage(iid, result_dict)
+    return result_dict
+
+
+def run_all_coverage(instances: list[dict], max_workers: int = 16,
+                     progress_callback=None, timeout: int = 300,
+                     use_cache: bool = True) -> dict[str, dict]:
+    """Run coverage for all instances in parallel. Returns {instance_id: result_dict}."""
+    results = {}
+    lock = threading.Lock()
+    done_count = [0]
+    total = len(instances)
+
+    def _run_one(inst):
+        iid = inst.get("instance_id", "unknown")
+        result = run_coverage_in_docker(inst, timeout=timeout, use_cache=use_cache)
+        with lock:
+            results[iid] = result
+            done_count[0] += 1
+            if progress_callback:
+                progress_callback(done_count[0], total, iid, result)
+        return iid, result
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        list(pool.map(_run_one, instances))
+
+    return results
 
 
 def _extract_coverage_json(output: str) -> dict:

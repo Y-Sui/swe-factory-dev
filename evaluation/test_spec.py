@@ -101,7 +101,7 @@ class TestSpec:
     def instance_image_key(self):
         if self.image_name:
             return self.image_name
-        iid = "internal-swe-bench-" + self.instance_id.split("__", 1)[1]
+        iid = ("internal-swe-bench-" + self.instance_id.split("__", 1)[1]).lower()
         return f"swebench/sweb.eval.x86_64.{iid}:latest"
 
     def get_instance_container_name(self, run_id=None):

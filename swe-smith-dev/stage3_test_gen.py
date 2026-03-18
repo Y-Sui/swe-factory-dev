@@ -149,24 +149,38 @@ async def generate_test(
 
 # ── Docker-based test validation ──────────────────────────────────────
 
-def build_docker_image(repo_key: str) -> str:
-    """Build the Docker image for a repo if not already built. Returns image tag."""
+def _get_repo_head_commit(repo_key: str) -> str:
+    """Get HEAD commit SHA of the cached repo."""
+    repo_path = REPOS[repo_key].path
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True, text=True, cwd=str(repo_path),
+    )
+    return result.stdout.strip()
+
+
+# Tracks the pinned image tag per repo (set after build)
+_pinned_image_tags: dict[str, str] = {}
+
+
+def _build_base_image(repo_key: str) -> str:
+    """Build the base Docker image from docker/Dockerfile.<repo>. Returns base tag."""
     config = DOCKER_TEST_CONFIG[repo_key]
-    image_tag = config["image_tag"]
+    base_tag = config["image_tag"]
     dockerfile = DOCKER_TEMPLATES[repo_key]
 
     result = subprocess.run(
-        ["docker", "image", "inspect", image_tag],
+        ["docker", "image", "inspect", base_tag],
         capture_output=True, timeout=10,
     )
     if result.returncode == 0:
-        print(f"  Docker image {image_tag} already exists")
-        return image_tag
+        print(f"  Base image {base_tag} already exists")
+        return base_tag
 
-    print(f"  Building Docker image {image_tag}...")
+    print(f"  Building base image {base_tag}...")
     build_cmd = [
         "docker", "build",
-        "-t", image_tag,
+        "-t", base_tag,
         "-f", str(dockerfile),
     ]
 
@@ -185,14 +199,46 @@ def build_docker_image(repo_key: str) -> str:
         print(f"  Docker build FAILED:\n{result.stderr[-500:]}")
         raise RuntimeError(f"Docker build failed for {repo_key}")
 
-    print(f"  Docker image {image_tag} built successfully")
-    return image_tag
+    print(f"  Base image {base_tag} built successfully")
+    return base_tag
+
+
+def build_docker_image(repo_key: str) -> str:
+    """Build base image, then a pinned image at HEAD commit. Returns pinned tag."""
+    base_tag = _build_base_image(repo_key)
+
+    commit_sha = _get_repo_head_commit(repo_key)
+    short_sha = commit_sha[:12]
+    pinned_tag = f"internal-swe-bench-swe-smith-{repo_key}:{short_sha}"
+
+    result = subprocess.run(
+        ["docker", "image", "inspect", pinned_tag],
+        capture_output=True, timeout=10,
+    )
+    if result.returncode == 0:
+        print(f"  Pinned image {pinned_tag} already exists")
+    else:
+        print(f"  Building pinned image {pinned_tag}...")
+        pinned_dockerfile = f"FROM {base_tag}\nWORKDIR /testbed\nRUN git checkout {commit_sha}\n"
+        result = subprocess.run(
+            ["docker", "build", "-t", pinned_tag, "-"],
+            input=pinned_dockerfile,
+            capture_output=True, text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            print(f"  Pinned image build FAILED:\n{result.stderr[-500:]}")
+            raise RuntimeError(f"Pinned image build failed for {repo_key}")
+        print(f"  Pinned image {pinned_tag} built successfully")
+
+    _pinned_image_tags[repo_key] = pinned_tag
+    return pinned_tag
 
 
 def validate_test_docker(test_source: str, repo_key: str) -> tuple[bool, str]:
     """Run a test file inside Docker. Returns (passed, output)."""
     config = DOCKER_TEST_CONFIG[repo_key]
-    image_tag = config["image_tag"]
+    image_tag = _pinned_image_tags.get(repo_key, config["image_tag"])
     test_dir = config["test_dir"]
     pytest_cmd = config["pytest_cmd"]
 

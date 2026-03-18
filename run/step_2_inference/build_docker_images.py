@@ -15,7 +15,7 @@ def image_name(instance_id: str) -> str:
 
 def build(item: dict) -> str:
     raw_id = item["instance_id"]
-    iid = "internal-swe-bench-" + raw_id.split("__", 1)[1]
+    iid = ("internal-swe-bench-" + raw_id.split("__", 1)[1]).lower()
     dockerfile = item.get("dockerfile", "")
     if not dockerfile:
         return f"[SKIP] {iid}: no dockerfile"

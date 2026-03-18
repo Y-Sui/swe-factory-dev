@@ -274,6 +274,7 @@ def format_instance(candidate: dict, repo_key: str, index: int) -> dict:
         "PASS_TO_PASS": "[]",
         "environment_setup_commit": base_commit,
         "docker_template": docker_template,
+        "docker_image": f"internal-swe-bench-swe-smith-{repo_key}:{base_commit[:12]}",
         "stripped_test_files": leaking_files,
         "function_metadata": {
             "func_name": candidate["func_name"],
