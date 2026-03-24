@@ -11,6 +11,7 @@ pip install -r bench-inspector/requirements.txt
 ## Run
 
 ```bash
+cd bench-inspector
 python3 -m streamlit run app.py --server.headless true --server.port 8888 --server.enableCORS false --server.enableXsrfProtection false
 ```
 
