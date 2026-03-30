@@ -1,8 +1,8 @@
-"""Build Docker images from a JSON data file.
+"""Build Docker images from a JSONL data file.
 
-Usage: python build_docker_images.py <path_to_json> [workers]
+Usage: python build_docker_images.py <path_to_jsonl> [workers]
 
-python3 run/step_2_inference/build_docker_images.py /home/yuansui/swe-factory-dev/internal-swe-bench-data/results_v1_gpt_5_2_68_20260307_verified.json 20
+python3 run/step_2_inference/build_docker_images.py /home/yuansui/internal-swe-bench/benchmark/all_instances_annotated_20260322_v2.jsonl 20
 """
 
 import json
@@ -39,14 +39,14 @@ def build(item: dict) -> str:
 
 def main():
     if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <path_to_json> [workers]")
+        print(f"Usage: {sys.argv[0]} <path_to_jsonl> [workers]")
         sys.exit(1)
 
-    json_file = sys.argv[1]
+    jsonl_file = sys.argv[1]
     workers = int(sys.argv[2]) if len(sys.argv) > 2 else 20
 
-    with open(json_file) as f:
-        data = json.load(f)
+    with open(jsonl_file) as f:
+        data = [json.loads(line) for line in f if line.strip()]
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for result in pool.map(build, data):

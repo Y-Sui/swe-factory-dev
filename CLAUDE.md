@@ -224,6 +224,40 @@ Round N:
 - A test that achieves FAIL2PASS with simple assertions is better than an elaborate test suite that is PASS2PASS.
 - When a generated test fails validation (FAIL2FAIL, PASS2PASS), iterate: read the failure output, diagnose the root cause, and adjust the prompt or test — don't blindly retry with the same approach.
 
+## Building Docker Images
+
+Preparing docker images is a two-step process. Always run from the repo root (`swe-factory-dev/`).
+
+### Step 1: Build base images
+
+```bash
+bash run/step_1_benchmark/build_base_images.sh
+```
+
+This builds 3 base images (skips if already present):
+- `internal-swe-bench-miroflow:base` (from `docker/Dockerfile.miroflow`)
+- `internal-swe-bench-mirothinker:base` (from `docker/Dockerfile.mirothinker`)
+- `internal-swe-bench-sd-torchtune:base` (from `docker/Dockerfile.sd-torchtune`, requires `GITHUB_TOKEN` in `.env`)
+
+### Step 2: Build instance images
+
+```bash
+python3 run/step_2_inference/build_docker_images.py <path_to_jsonl> [workers]
+```
+
+- Input: a JSONL file where each line has `instance_id` and `dockerfile` fields.
+- Each instance's Dockerfile uses `FROM internal-swe-bench-<repo>:base`, so base images must exist first.
+- Default 20 parallel workers. Skips instances that already have a built image or have no `dockerfile` field.
+- Output image name: `swebench/sweb.eval.x86_64.internal-swe-bench-<repo>-<id>:latest`
+
+### Example full run
+
+```bash
+cd /home/yuansui/swe-factory-dev
+bash run/step_1_benchmark/build_base_images.sh
+python3 run/step_2_inference/build_docker_images.py /home/yuansui/internal-swe-bench/benchmark/all_instances_annotated_20260322_v2.jsonl 20
+```
+
 ## Configuration
 
 - Local runs require env vars in `.env`: `OPENAI_KEY`, `OPENAI_API_BASE_URL`, optionally `GITHUB_TOKEN` (for private repos).
